@@ -1,0 +1,2348 @@
+library(shiny)
+library(rhandsontable)
+library(tidyverse)
+library(janitor)
+library(plotly)
+
+# Functions --------------------------------------------------------------------
+
+expected_shared_prize <- function(n, p, cost) {
+  # Simple formula for shared prize
+  k_vals <- 1:n
+  probs <- choose(n - 1, k_vals - 1) * p^k_vals * (1 - p)^(n - k_vals)
+  denom <- sum(probs / k_vals)
+  ev <- cost / denom
+  return(ev)
+}
+
+# Calculate expected costs 
+calculate_project_metrics <- function(data, discount_rate, target_probability, 
+                                      use_feasibility = FALSE, eta = 1){
+  df = as_tibble(data)
+  total_stages = max(data$Stage)
+  
+  calc_df = df %>% 
+    rename(push_funding = `Share of costs covered by other sources`) %>% 
+    clean_names() %>% 
+    rename(prob = probability) %>% 
+    mutate(cumsum_prob = cumprod(prob),
+           cost_after_push = cost*(1-push_funding),
+           cumsum_duration = cumsum(duration)) %>% 
+    mutate(
+      # Convert costs into discounted amounts ....
+      disc_cost = pmap_dbl(
+        list(cost_after_push, duration, cumsum_duration),
+        \(cost_after_push, dur, cum_dur) {
+          dur_months <- round(dur * 12)
+          start_month <- round((cum_dur - dur) * 12) + 1
+          months <- seq(start_month, start_month + dur_months - 1)
+          monthly_rate <- (1 + discount_rate)^(1/12)
+          sum((cost_after_push / dur_months) * (monthly_rate ^ months))
+        }
+      )) %>% 
+    # Calculate the EXPECTED cost per stage ...
+    mutate(previous_prob = lag(prob),
+           previous_prob = replace_na(previous_prob, 1),
+           cumprod_prob = cumprod(previous_prob),
+           expected_stage_cost = cumprod_prob*disc_cost)
+  
+  # Calculate individual firm PoS and costs ... 
+  prob_of_success = prod(calc_df$prob)
+  cost_to_attempt = sum(calc_df$expected_stage_cost)
+  tot_duration = sum(calc_df$duration)
+  
+  # Working backwards from target probability
+  target_base <- if (use_feasibility) target_probability / eta else target_probability
+  
+  # Make sure target is valid and handle edge cases
+  if (target_base >= 0.99999) {
+    target_base <- 0.99999  # Cap to avoid log(0)
+  }
+  
+  # Calculate number of firms needed
+  if (prob_of_success < 1 && target_base > 0 && target_base < 1) {
+    n_firms_needed = log(1 - target_base) / log(1 - prob_of_success)
+    n_firms = ceiling(n_firms_needed)
+    
+    # Ensure at least 1 firm
+    if (n_firms < 1 || is.infinite(n_firms) || is.nan(n_firms)) {
+      n_firms = 1
+    }
+  } else {
+    n_firms = 1
+  }
+  
+  # Recalculate the ACTUAL probability achieved with this integer number of firms
+  base_global_pos <- 1 - (1 - prob_of_success)^n_firms
+  
+  # Apply feasibility adjustment if enabled
+  if (use_feasibility) {
+    global_pos <- base_global_pos * eta
+  } else {
+    global_pos <- base_global_pos
+  }
+  
+  # Calculate return values .....
+  guaranteed_prize = (cost_to_attempt/prob_of_success) * n_firms
+  shared_prize = expected_shared_prize(n_firms, prob_of_success, cost_to_attempt)
+  exp_shared_prize = shared_prize * global_pos
+  total_milestone_cost = n_firms*cost_to_attempt
+  wasted_milestone_cost = (1-global_pos) *  total_milestone_cost
+  push_funding = sum(calc_df$cost * calc_df$push_funding)
+  
+  return(list(total_milestone_cost = total_milestone_cost,
+              wasted_milestone_cost = wasted_milestone_cost,
+              prob_of_success = prob_of_success,
+              cost_to_attempt = cost_to_attempt,
+              shared_prize = shared_prize,
+              expected_shared_prize = exp_shared_prize,
+              n_firms = n_firms, 
+              global_pos = global_pos,
+              target_probability = target_probability,  # Added to show target vs actual
+              push_funding = push_funding,
+              cost_unit = data$cost_unit,
+              use_feasibility = use_feasibility,
+              eta = eta,
+              tot_duration = tot_duration))
+}
+
+# UI ---------------------------------------------------------------------------
+
+ui <- fluidPage(
+  titlePanel(
+    div(style = "color: white; font-weight: 800; font-size: 2.5rem; text-shadow: 0 2px 20px rgba(0,0,0,0.3); letter-spacing: -1px;",
+        "Financial Mechanism Calculator")
+  ),
+  
+  # Introduction section
+  div(style = "background: rgba(255, 255, 255, 0.95); backdrop-filter: blur(20px); padding: 25px 30px; border-radius: 16px; margin: 0 0 30px 0; box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);",
+      h4("About This Calculator", style = "color: #790F74; font-weight: 700; margin-top: 0; margin-bottom: 15px;"),
+      p(style = "color: #4a5568; font-size: 14px; line-height: 1.6; margin-bottom: 12px;",
+        "This calculator helps you calculate how large a prize or pull mechanism needs to be to incentivize a given level of innovation. It compares ", 
+        strong("shared prizes"), " (where successful participants split a prize) versus ", 
+        strong("milestone payments"), " (where all participants receive staged payments)."),
+      
+      p(style = "color: #4a5568; font-size: 14px; line-height: 1.6; margin-bottom: 15px;",
+        strong("How to use:")),
+      tags$ol(style = "color: #4a5568; font-size: 14px; line-height: 1.8; margin-left: 20px; margin-bottom: 15px;",
+              tags$li("Configure your project stages with costs and success probabilities"),
+              tags$li("Set your parameters and target global probability"),
+              tags$li("Click 'Calculate Results' to see the optimal prize structure"),
+              tags$li("Save different scenarios to compare them")
+      ),
+      
+      tags$a(href = "https://williamjackarnesen.github.io/msa-amc-sizing/", target = "_blank", 
+             style = "color: #790F74; font-weight: 600; text-decoration: none; font-size: 14px;",
+             "Read more about the methodology →")
+  ),
+  
+  tags$head(
+    tags$style(HTML("
+      @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+      
+      * {
+        transition: all 0.2s ease;
+      }
+      
+      body {
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        background: linear-gradient(135deg, #5a0b57 0%, #790F74 50%, #a855f7 100%);
+        background-attachment: fixed;
+        min-height: 100vh;
+      }
+      
+      .container-fluid {
+        padding: 30px;
+      }
+      
+      h1, h2, h3, h4 {
+        font-weight: 700;
+        color: #1a1a2e;
+        font-family: 'Inter', sans-serif;
+        letter-spacing: -0.5px;
+      }
+      
+      h1 {
+        color: white !important;
+        font-size: 2.5rem;
+        font-weight: 800;
+        text-shadow: 0 2px 20px rgba(0,0,0,0.2);
+        margin-bottom: 30px;
+        letter-spacing: -1px;
+      }
+      
+      .input-panel {
+        background: rgba(255, 255, 255, 0.95);
+        backdrop-filter: blur(20px);
+        padding: 30px;
+        border-radius: 20px;
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        animation: slideInLeft 0.6s ease-out;
+      }
+      
+      @keyframes slideInLeft {
+        from {
+          opacity: 0;
+          transform: translateX(-30px);
+        }
+        to {
+          opacity: 1;
+          transform: translateX(0);
+        }
+      }
+      
+      @keyframes slideInRight {
+        from {
+          opacity: 0;
+          transform: translateX(30px);
+        }
+        to {
+          opacity: 1;
+          transform: translateX(0);
+        }
+      }
+      
+      .results-panel {
+        background: rgba(255, 255, 255, 0.95);
+        backdrop-filter: blur(20px);
+        padding: 30px;
+        border-radius: 20px;
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        animation: slideInRight 0.6s ease-out;
+      }
+      
+      .purple-button {
+        background: linear-gradient(135deg, #790F74 0%, #a855f7 100%);
+        color: white;
+        border: none;
+        font-weight: 600;
+        padding: 15px 30px;
+        border-radius: 12px;
+        font-family: 'Inter', sans-serif;
+        font-size: 16px;
+        letter-spacing: 0.3px;
+        box-shadow: 0 10px 30px rgba(121, 15, 116, 0.4);
+        position: relative;
+        overflow: hidden;
+      }
+      
+      .purple-button::before {
+        content: '';
+        position: absolute;
+        top: 0;
+        left: -100%;
+        width: 100%;
+        height: 100%;
+        background: linear-gradient(90deg, transparent, rgba(255,255,255,0.3), transparent);
+        transition: left 0.5s;
+      }
+      
+      .purple-button:hover::before {
+        left: 100%;
+      }
+      
+      .purple-button:hover {
+        color: white;
+        transform: translateY(-3px);
+        box-shadow: 0 15px 40px rgba(121, 15, 116, 0.6);
+      }
+      
+      .purple-button:active {
+        transform: translateY(-1px);
+      }
+      
+      .form-control, .form-select {
+        border-radius: 10px;
+        border: 2px solid #e0e7ff;
+        padding: 12px 16px;
+        font-family: 'Inter', sans-serif;
+        background: white;
+        font-size: 15px;
+        transition: all 0.3s ease;
+      }
+      
+      .form-control:focus, .form-select:focus {
+        border-color: #790F74;
+        box-shadow: 0 0 0 4px rgba(121, 15, 116, 0.1);
+        outline: none;
+      }
+      
+      .handsontable {
+        font-size: 13px;
+        font-family: 'Inter', sans-serif;
+        border-radius: 12px;
+        overflow: hidden;
+        box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+      }
+      
+      .handsontable th {
+        background: #790F74 !important;
+        color: white !important;
+        font-weight: 600 !important;
+        padding: 6px 4px !important;
+        white-space: normal !important;
+        line-height: 1.1 !important;
+        vertical-align: middle !important;
+        word-wrap: break-word !important;
+        font-family: 'Inter', sans-serif !important;
+        text-transform: uppercase;
+        font-size: 10px;
+        letter-spacing: 0.3px;
+        height: auto !important;
+        max-height: 45px !important;
+      }
+      
+      .handsontable td {
+        background-color: white !important;
+        font-family: 'Inter', sans-serif !important;
+        vertical-align: middle !important;
+        text-align: center !important;
+        padding: 8px 6px !important;
+        border-color: #f0f0f0 !important;
+        font-size: 14px;
+      }
+      
+      .handsontable td:nth-child(2) {
+        text-align: left !important;
+        font-weight: 500;
+      }
+      
+      .handsontable td.htDimmed {
+        background-color: #fafafa !important;
+      }
+      
+      .handsontable tbody tr:hover td {
+        background-color: #f8f9ff !important;
+      }
+      
+      .section-header {
+        margin-top: 25px;
+        margin-bottom: 12px;
+        padding-bottom: 8px;
+        background: linear-gradient(90deg, #790F74, transparent);
+        background-clip: text;
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        font-size: 1.2rem;
+        position: relative;
+        font-weight: 600;
+      }
+      
+      .section-header::after {
+        content: '';
+        position: absolute;
+        bottom: 0;
+        left: 0;
+        width: 50px;
+        height: 2px;
+        background: linear-gradient(90deg, #790F74, #a855f7);
+        border-radius: 2px;
+      }
+      
+      .help-text {
+        background: linear-gradient(135deg, rgba(121, 15, 116, 0.1), rgba(215, 177, 221, 0.1));
+        padding: 16px 20px;
+        border-radius: 12px;
+        border-left: 4px solid #790F74;
+        margin-bottom: 20px;
+        font-family: 'Inter', sans-serif;
+        color: #2d3748;
+        font-size: 15px;
+        line-height: 1.6;
+        font-weight: 500;
+      }
+      
+      .background-help-text {
+        background: rgba(255, 255, 255, 0.85);
+        backdrop-filter: blur(10px);
+        padding: 12px 18px;
+        border-radius: 10px;
+        margin-bottom: 15px;
+        font-family: 'Inter', sans-serif;
+        color: #2d3748;
+        font-size: 14px;
+        line-height: 1.6;
+        font-weight: 500;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+        border-left: 3px solid rgba(121, 15, 116, 0.6);
+      }
+      
+      .instruction-text {
+        padding: 0px;
+        margin-top: 6px;
+        margin-bottom: 16px;
+        font-size: 13px;
+        color: #718096;
+        font-family: 'Inter', sans-serif;
+        line-height: 1.5;
+        font-weight: 400;
+        font-style: italic;
+      }
+      
+      .warning-box {
+        background: linear-gradient(135deg, rgba(239, 68, 68, 0.1), rgba(220, 38, 38, 0.05));
+        border-left: 4px solid #ef4444;
+        padding: 16px 20px;
+        border-radius: 10px;
+        margin-bottom: 20px;
+        font-family: 'Inter', sans-serif;
+      }
+      
+      .warning-text {
+        color: #991b1b;
+        font-size: 14px;
+        line-height: 1.6;
+        font-weight: 500;
+        margin: 0;
+      }
+      
+      .results-container {
+        background: white;
+        padding: 30px;
+        border-radius: 16px;
+        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+        font-family: 'Inter', sans-serif;
+      }
+      
+      .result-item {
+        margin-bottom: 20px;
+        padding: 20px;
+        background: linear-gradient(135deg, rgba(121, 15, 116, 0.05), rgba(215, 177, 221, 0.05));
+        border-radius: 12px;
+        border-left: 4px solid #790F74;
+        transition: all 0.3s ease;
+      }
+      
+      .result-item:hover {
+        transform: translateX(5px);
+        box-shadow: 0 5px 15px rgba(121, 15, 116, 0.2);
+      }
+      
+      .result-label {
+        font-size: 15px;
+        color: #718096;
+        margin-bottom: 8px;
+        font-family: 'Inter', sans-serif;
+        font-weight: 500;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+      }
+      
+      .result-value {
+        font-size: 24px;
+        font-weight: 700;
+        background: linear-gradient(135deg, #790F74, #a855f7);
+        background-clip: text;
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        font-family: 'Inter', sans-serif;
+      }
+      
+      #prize_plot {
+        background: white;
+        padding: 20px;
+        border-radius: 16px;
+        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+        overflow: hidden;
+      }
+      
+      label {
+        font-weight: 600;
+        color: #1a202c;
+        margin-bottom: 8px;
+        font-size: 15px;
+        letter-spacing: 0.3px;
+      }
+      
+      .btn-warning {
+        background: linear-gradient(135deg, #f093fb, #f5576c);
+        border: none;
+        color: white;
+        font-weight: 600;
+        border-radius: 8px;
+        padding: 8px 16px;
+        transition: all 0.3s ease;
+      }
+      
+      .btn-warning:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 8px 20px rgba(245, 87, 108, 0.4);
+        color: white;
+      }
+      
+      /* Push funding button hover effect */
+      #toggle_push_funding:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 6px 20px rgba(102, 126, 234, 0.5);
+      }
+      
+      /* Expand plot button hover effect */
+      #expand_plot:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 6px 20px rgba(121, 15, 116, 0.5);
+      }
+      
+      hr {
+        border: none;
+        height: 2px;
+        background: linear-gradient(90deg, #667eea, transparent);
+        margin: 30px 0;
+      }
+      
+      /* Custom scrollbar */
+      ::-webkit-scrollbar {
+        width: 10px;
+      }
+      
+      ::-webkit-scrollbar-track {
+        background: rgba(0,0,0,0.1);
+        border-radius: 10px;
+      }
+      
+      ::-webkit-scrollbar-thumb {
+        background: linear-gradient(135deg, #790F74, #a855f7);
+        border-radius: 10px;
+      }
+      
+      ::-webkit-scrollbar-thumb:hover {
+        background: linear-gradient(135deg, #a855f7, #790F74);
+      }
+      
+      /* Animate elements on load */
+      @keyframes fadeInUp {
+        from {
+          opacity: 0;
+          transform: translateY(20px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+      
+      @keyframes slideDown {
+        from {
+          opacity: 0;
+          max-height: 0;
+          transform: translateY(-10px);
+        }
+        to {
+          opacity: 1;
+          max-height: 500px;
+          transform: translateY(0);
+        }
+      }
+      
+      .input-panel > *, .results-panel > * {
+        animation: fadeInUp 0.6s ease-out backwards;
+      }
+      
+      .input-panel > *:nth-child(2) { animation-delay: 0.1s; }
+      .input-panel > *:nth-child(3) { animation-delay: 0.2s; }
+      .input-panel > *:nth-child(4) { animation-delay: 0.3s; }
+      
+      /* Hover effects for interactive elements */
+      .input-panel:hover, .results-panel:hover {
+        box-shadow: 0 25px 70px rgba(0, 0, 0, 0.35);
+      }
+      
+      /* Full screen modal */
+      .modal-dialog.modal-xl {
+        max-width: 95vw !important;
+        width: 95vw !important;
+        margin: 2.5vh auto !important;
+      }
+      
+      .modal-content {
+        height: 95vh !important;
+        border-radius: 20px !important;
+        border: none !important;
+        box-shadow: 0 25px 80px rgba(0, 0, 0, 0.4) !important;
+      }
+      
+      .modal-body {
+        padding: 30px !important;
+        display: flex !important;
+        flex-direction: column !important;
+        height: calc(95vh - 60px) !important;
+      }
+      
+      .modal-header {
+        border-bottom: 2px solid #f0f0f0 !important;
+        padding: 20px 30px !important;
+        background: linear-gradient(135deg, rgba(121, 15, 116, 0.05), rgba(215, 177, 221, 0.05)) !important;
+        border-radius: 20px 20px 0 0 !important;
+      }
+      
+            
+      /* Hybrid slider styling */
+      .irs--shiny .irs-bar {
+        background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+        border: none;
+      }
+      
+      .irs--shiny .irs-from, .irs--shiny .irs-to, .irs--shiny .irs-single {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+      }
+      
+      .irs--shiny .irs-handle {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        border: 2px solid white;
+        box-shadow: 0 2px 8px rgba(118, 75, 162, 0.4);
+      }
+      
+      .irs--shiny .irs-handle:hover {
+        background: linear-gradient(135deg, #764ba2 0%, #667eea 100%);
+      }
+    "))
+  ),
+  
+  fluidRow(
+    column(6,
+           div(class = "input-panel",
+               h3("Inputs", style = "font-size: 1.8rem; margin-top: 0; color: #790F74; font-weight: 700;"),
+               p(style = "color: #718096; font-size: 13px; line-height: 1.5; margin-bottom: 20px; font-style: italic;",
+                 "Configure your project stages and parameters below to calculate the optimal prize structure."),
+               
+               h4("Stage Data", style = "font-size: 1.6rem; margin-top: 20px; margin-bottom: 10px; color: #790F74; font-weight: 600;"),
+               p(style = "color: #718096; font-size: 13px; line-height: 1.5; margin-bottom: 16px; font-style: italic;",
+                 "Innovation projects typically progress through sequential stages (e.g., research, prototyping, clinical trials). Academic and grey literature often provide estimates of costs and success probabilities for each stage."),
+               
+               numericInput("num_stages", "Number of Stages:", value = 4, min = 1, max = 20, step = 1),
+               div(class = "instruction-text",
+                   "Specify how many sequential stages your project has. Each stage represents a distinct phase of development."),
+               
+               rHandsontableOutput("stages_table"),
+               uiOutput("stage_instructions"),
+               
+               h4("Parameters", style = "font-size: 1.6rem; margin-top: 20px; margin-bottom: 10px; color: #790F74; font-weight: 600;"),
+               selectInput("cost_unit", "Cost Unit:",
+                           choices = c("Millions ($M)" = "M", 
+                                       "Thousands ($K)" = "K",
+                                       "Billions ($B)" = "B",
+                                       "Dollars ($)" = "1"),
+                           selected = "M"),
+               div(class = "instruction-text",
+                   "Select the unit for all cost values throughout the calculator."),
+               
+               numericInput("discount_rate", "Discount Rate:", value = 0.09, min = 0, max = 1, step = 0.01),
+               div(class = "instruction-text",
+                   HTML("Annual discount rate for calculating present value of future costs (e.g., 0.05 = 5%). <strong>Why discount rates matter:</strong> Money today is worth more than money tomorrow due to opportunity costs and risk. A 9% discount rate reflects typical cost of capital for innovation projects and accounts for the time value of money across multi-year development timelines. <strong>Default: 9%</strong> based on standard financial modeling practices for R&D investments.")),
+               
+               numericInput("target_probability", "Target Global Probability of Success:", value = 0.8, min = 0, max = 1, step = 0.01),
+               div(class = "instruction-text",
+                   "The desired overall probability that at least one firm succeeds (0 to 1, e.g., 0.8 = 80%). The calculator will determine how many firms/attempts are needed to achieve this target."),
+               
+               h5("Advanced Settings", style = "font-size: 1.5rem; margin-top: 20px; margin-bottom: 10px; color: #790F74; font-weight: 600;"),
+               
+               # Feasibility adjustment
+               checkboxInput("use_feasibility", "Account for fundamental feasibility uncertainty", value = FALSE),
+               div(class = "instruction-text",
+                   HTML("By default, the model assumes the innovation is definitely achievable if enough firms try. In reality, the innovation might not be fundamentally possible. Enabling this increases the estimated prize size.")),
+               
+               conditionalPanel(
+                 condition = "input.use_feasibility == true",
+                 numericInput("eta", "Global Possibility Parameter (η):", value = 0.75, min = 0, max = 1, step = 0.05),
+                 div(class = "instruction-text",
+                     "The probability that the innovation is fundamentally achievable (0 to 1). For example, 0.75 means there's a 75% chance the innovation can be accomplished at all. This accounts for the possibility that the technology may simply not be feasible regardless of how many firms attempt it.")
+               ),
+               
+               # Mechanism selection
+               h5("Incentive Mechanisms to Model", style = "margin-top: 20px; font-weight: 700; color: #790F74;"),
+               checkboxGroupInput("mechanisms", "Select Mechanism(s):",
+                                  choices = c("Shared prize" = "shared", 
+                                              "AMC (Advance Market Commitment)" = "amc",
+                                              "Hybrid (Shared Prize + AMC)" = "hybrid"),
+                                  selected = "shared"),
+               div(class = "instruction-text", "Pick at least one mechanism. You can compare multiple mechanisms side-by-side."),
+               
+               # Hybrid split ratio (conditional - ONLY shows when hybrid is selected)
+               conditionalPanel(
+                 condition = "input.mechanisms && input.mechanisms.indexOf('hybrid') >= 0",
+                 h5("Hybrid Split Parameters", style = "margin-top: 10px; font-weight: 700; color: #790F74;"),
+                 sliderInput("hybrid_split", "Upfront Shared Prize Percentage:", 
+                             min = 0, max = 100, value = 50, step = 5, post = "%"),
+                 div(class = "instruction-text", 
+                     "What percentage should be paid as an upfront shared prize? The remainder will be covered by the AMC subsidy over time.")
+               ),
+               
+               # AMC inputs (conditional - shows when amc OR hybrid is selected)
+               conditionalPanel(
+                 condition = "(input.mechanisms && input.mechanisms.indexOf('amc') >= 0) || (input.mechanisms && input.mechanisms.indexOf('hybrid') >= 0)",
+                 h5("AMC Parameters", style = "margin-top: 10px; font-weight: 700; color: #790F74;"),
+                 numericInput("amc_topup", "Top-up amount (per unit, dollars):", value = 100, min = 0, step = 1),
+                 numericInput("amc_lifecycle", "Product life cycle (years):", value = 10, min = 1, step = 1),
+                 radioButtons("amc_uptake_model", "Uptake model:", 
+                              choices = c("Linear" = "linear", "S-shaped (logistic)" = "s_shaped"), 
+                              selected = "linear", inline = TRUE),
+                 conditionalPanel(
+                   condition = "input.amc_uptake_model == 's_shaped'",
+                   numericInput("amc_max_units", "Max monthly capacity (units/month):", value = 10000, min = 0, step = 100),
+                   numericInput("amc_growth", "Growth rate (logistic k):", value = 0.5, min = 0.01, step = 0.01),
+                   numericInput("amc_peak_time", "Peak (inflection) time (years):", value = 5, min = 0, step = 0.1),
+                   div(style = "margin-top: 10px;",
+                       plotlyOutput("amc_uptake_plot", height = "220px")
+                   )
+                 ),
+                 conditionalPanel(
+                   condition = "input.amc_uptake_model == 'linear'",
+                   numericInput("amc_yearly_units", "Yearly units sold (constant annual):", value = 100000, min = 0, step = 1000)
+                 )
+               ),
+               
+               # Validation warnings
+               uiOutput("validation_warnings"),
+               
+               br(),
+               actionButton("calculate", "Calculate Results", class = "btn-lg btn-block purple-button")
+           )
+    ),
+    column(6,
+           div(class = "results-panel",
+               h3("Results", style = "font-size: 1.8rem; margin-top: 0; color: #790F74; font-weight: 700;"),
+               p(style = "color: #718096; font-size: 13px; line-height: 1.5; margin-bottom: 20px; font-style: italic;",
+                 "Compare the cost-effectiveness of shared prizes, AMCs, and milestone payments. Use the 'Save Results' feature below to compare different scenarios side-by-side."),
+               uiOutput("results"),
+               br(),
+               div(style = "display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;",
+                   h4("Probability vs Prize Cost", style = "font-size: 1.3rem; margin-bottom: 0; color: #790F74; font-weight: 600;"),
+                   div(style = "display: flex; gap: 10px; align-items: center;",
+                       selectInput("plot_mechanism", NULL,
+                                   choices = c("Shared Prize" = "shared", "AMC" = "amc", "Hybrid" = "hybrid"),
+                                   selected = "shared",
+                                   width = "150px"),
+                       actionButton("expand_plot", "", 
+                                    icon = icon("expand"),
+                                    style = "background: linear-gradient(135deg, #790F74, #a855f7);
+                            color: white;
+                            border: none;
+                            padding: 10px 15px;
+                            border-radius: 8px;
+                            box-shadow: 0 4px 10px rgba(121, 15, 116, 0.3);
+                            transition: all 0.3s ease;
+                            cursor: pointer;",
+                                    title = "Expand to full screen")
+                   )
+               ),
+               plotlyOutput("prize_plot", height = "400px"),
+               div(style = "background-color: white; padding: 20px; border-radius: 8px; box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.05); margin-top: 15px;",
+                   p(style = "color: #718096; font-size: 13px; margin-bottom: 12px; font-style: italic;",
+                     "Select saved scenarios below to compare them on the chart:"),
+                   selectInput("selected_archetypes", "Select Archetypes to Display:",
+                               choices = NULL,
+                               multiple = TRUE),
+                   actionButton("clear_archetypes", "Clear All Saved", class = "btn-sm btn-warning")
+               )
+           )
+    )
+  )
+)
+
+# Server -----------------------------------------------------------------------
+
+server <- function(input, output, session) {
+  
+  # Storage for saved archetypes
+  saved_archetypes <- reactiveValues(
+    data = list(),  # Will store list of archetype results
+    push_funding_visible = FALSE  # Track visibility of push funding section
+  )
+  
+  # Validation reactive
+  validation_status <- reactive({
+    warnings <- list()
+    
+    # Check if mechanism selected
+    if (is.null(input$mechanisms) || length(input$mechanisms) == 0) {
+      warnings$mechanism <- ⚠️ You must select at least one incentive mechanism (Shared prize and/or AMC)."
+    }
+    
+    # Check if target probability exceeds global possibility parameter
+    if (!is.null(input$use_feasibility) && input$use_feasibility) {
+      if (!is.null(input$target_probability) && !is.null(input$eta) && input$target_probability > input$eta) {
+        warnings$feasibility <- sprintf(
+          "⚠️ Target probability (%.0f%%) cannot exceed the global possibility parameter (%.0f%%). The maximum achievable probability is limited by whether the innovation is fundamentally possible.",
+          input$target_probability * 100,
+          input$eta * 100
+        )
+      }
+      
+      # Warn if they're very close (within 1%)
+      if (!is.null(input$target_probability) && !is.null(input$eta) && 
+          abs(input$target_probability - input$eta) < 0.01 && input$target_probability <= input$eta) {
+        warnings$edge_case <- "⚠️ Target probability is very close to the global possibility limit. Results may be sensitive to small changes."
+      }
+    }
+    
+    return(warnings)
+  })
+  
+  # Render validation warnings
+  output$validation_warnings <- renderUI({
+    warnings <- validation_status()
+    
+    if (length(warnings) == 0) {
+      return(NULL)
+    }
+    
+    warning_divs <- lapply(warnings, function(warning_text) {
+      div(class = "warning-box",
+          p(class = "warning-text", HTML(warning_text))
+      )
+    })
+    
+    do.call(tagList, warning_divs)
+  })
+  
+  # Toggle push funding visibility
+  observeEvent(input$toggle_push_funding, {
+    saved_archetypes$push_funding_visible <- !saved_archetypes$push_funding_visible
+    
+    # Update button icon
+    if (saved_archetypes$push_funding_visible) {
+      updateActionButton(session, "toggle_push_funding", 
+                         icon = icon("chevron-up"))
+    } else {
+      updateActionButton(session, "toggle_push_funding", 
+                         icon = icon("chevron-down"))
+    }
+  })
+  
+  # Render push funding content
+  output$push_funding_content <- renderUI({
+    if (saved_archetypes$push_funding_visible) {
+      results <- calculated_results()
+      unit_label <- get_unit_label()
+      
+      div(
+        style = "margin-top: 15px; padding: 20px 24px;
+             background: linear-gradient(135deg, rgba(102, 126, 234, 0.05), rgba(118, 75, 162, 0.05));
+             border-radius: 12px; border-left: 4px solid #667eea;
+             font-family: 'Inter', sans-serif; line-height: 1.6;
+             animation: slideDown 0.3s ease-out;",
+        
+        p(style = "font-size: 15px; color: #2d3748; margin: 0; font-weight: 500;",
+          sprintf("If milestone payments were provided to each firm at every stage, the total cost would be $%s%s. There is a %.1f%% chance that none of the %d firms would succeed, meaning all payments would be wasted.",
+                  format(round(results$total_milestone_cost, 1), big.mark = ","),
+                  substr(unit_label, 2, 2),
+                  (1 - results$global_pos) * 100,
+                  results$n_firms)
+        )
+      )
+    }
+  })
+  
+  # Helper function to get unit label
+  get_unit_label <- reactive({
+    switch(input$cost_unit,
+           "M" = "$M",
+           "K" = "$K",
+           "B" = "$B",
+           "1" = "$")
+  })
+  
+  # Helper function to get unit name
+  get_unit_name <- reactive({
+    switch(input$cost_unit,
+           "M" = "millions of dollars",
+           "K" = "thousands of dollars",
+           "B" = "billions of dollars",
+           "1" = "dollars")
+  })
+  
+  # Reactive adoption curve generator (updates immediately when AMC params change)
+  adoption_curve <- reactive({
+    req(input$amc_lifecycle)
+    T <- input$amc_lifecycle
+    total_months <- ceiling(T*12)
+    months <- seq(1, total_months)
+    
+    if (is.null(input$amc_uptake_model) || input$amc_uptake_model == "linear") {
+      # User enters yearly units, divide by 12 for monthly
+      units <- rep(ifelse(is.null(input$amc_yearly_units), 0, input$amc_yearly_units / 12), total_months)
+    } else {
+      # logistic S-shaped - user enters monthly max capacity, don't divide
+      K <- ifelse(is.null(input$amc_max_units), 0, input$amc_max_units)  # Already monthly!
+      r <- ifelse(is.null(input$amc_growth), 1, input$amc_growth)
+      t0 <- ifelse(is.null(input$amc_peak_time), total_months/2, input$amc_peak_time * 12)  # Convert years to months
+      units <- K / (1 + exp(-r * (months - t0)))
+    }
+    tibble(month = months, units = units)
+  })
+  
+  output$amc_uptake_plot <- renderPlotly({
+    # Only show plot for S-shaped model
+    req(input$amc_uptake_model == "s_shaped")
+    
+    df <- adoption_curve()
+    p <- plot_ly(df, x = ~month, y = ~units, type = 'scatter', mode = 'lines',
+                 line = list(color = '#790F74', width = 2)) %>%
+      layout(
+        xaxis = list(title = 'Month', gridcolor = '#f0f0f0'),
+        yaxis = list(title = 'Units (monthly)', gridcolor = '#f0f0f0'),
+        plot_bgcolor = '#ffffff',
+        paper_bgcolor = '#ffffff',
+        font = list(family = "Inter, sans-serif", size = 11),
+        margin = list(t = 10, r = 10, b = 40, l = 50)
+      ) %>%
+      config(displayModeBar = FALSE)
+    p
+  })
+  
+  # Reactive value that only updates when Calculate button is clicked
+  calculated_results <- eventReactive(input$calculate, {
+    # Validate mechanisms selection
+    if (is.null(input$mechanisms) || length(input$mechanisms) == 0) {
+      showNotification("Please select at least one incentive mechanism before calculating.", type = "error")
+      # Return a safe default (previous or baseline)
+      df_prev <- DF()
+      return(calculate_project_metrics(df_prev, input$discount_rate, input$target_probability, input$use_feasibility, if(input$use_feasibility) input$eta else 1))
+    }
+    
+    # On first load (when calculate = 0), use default data
+    if (input$calculate == 0) {
+      df <- DF()
+    } else {
+      df <- hot_to_r(input$stages_table)
+    }
+    
+    discount_rate <- input$discount_rate
+    target_probability <- input$target_probability
+    use_feasibility <- input$use_feasibility
+    
+    # Get parameters
+    eta <- if(use_feasibility) input$eta else 1
+    
+    results <- calculate_project_metrics(df, discount_rate, target_probability,
+                                         use_feasibility, eta)
+    
+    # Add settings to results for proper display
+    results$cost_unit <- input$cost_unit
+    
+    # ---- AMC calculations (if requested) ----
+    results$amc <- NULL
+    if (!is.null(input$mechanisms) && 'amc' %in% input$mechanisms) {
+      # Build units vector from adoption_curve (monthly units)
+      ac <- adoption_curve()
+      
+      # Check if ac is valid
+      if (is.null(ac) || nrow(ac) == 0 || sum(ac$units) == 0) {
+        results$amc <- list(
+          topup = 0,
+          lifecycle = 0,
+          units_vec = numeric(0),
+          units_to_cover_total = 0,
+          amc_size_undiscounted = 0,
+          expected_amc = 0,
+          covers_prize = FALSE
+        )
+      } else {
+        units_vec <- ac$units
+        T <- nrow(ac)
+        
+        # Convert AMC top-up to dollars regardless of cost_unit
+        unit_factor <- switch(input$cost_unit,
+                              "M" = 1e6,
+                              "K" = 1e3,
+                              "B" = 1e9,
+                              "1" = 1)
+        
+        topup <- ifelse(is.null(input$amc_topup) || input$amc_topup == 0, 0, input$amc_topup)
+        
+        if (topup == 0) {
+          results$amc <- list(
+            topup = 0,
+            lifecycle = T,
+            units_vec = units_vec,
+            units_to_cover_total = 0,
+            amc_size_undiscounted = 0,
+            expected_amc = 0,
+            covers_prize = FALSE
+          )
+        } else {
+          shared_prize_val <- (results$shared_prize) * unit_factor
+          first_month_payout <- ceiling(results$tot_duration * 12)
+          
+          ac <- ac %>% 
+            mutate(month = month + first_month_payout,
+                   monthly_rate = 1/( ((1 + discount_rate)^(1/12)) ^ month)) %>% 
+            mutate(paid_amount = topup * units * monthly_rate,
+                   cumulative_payment = cumsum(paid_amount),
+                   exceeds_prize_cost = cumulative_payment > shared_prize_val)
+          
+          # Check if AMC ever covers the prize cost
+          max_cumulative <- max(ac$cumulative_payment)
+          amc_covers_prize <- max_cumulative >= shared_prize_val
+          
+          if (!amc_covers_prize) {
+            # AMC never covers the prize
+            covered_units <- 0
+            amc <- 0
+            expected_amc <- 0
+          } else {
+            # Filter to rows up to when prize is covered (original logic)
+            ac <- ac %>% 
+              mutate(lag = lag(exceeds_prize_cost),
+                     lag = replace_na(lag, FALSE)) %>% 
+              filter(!lag)
+            
+            covered_units <- sum(ac$units)
+            amc <- (covered_units * topup) / unit_factor
+            expected_amc <- amc * results$global_pos
+          }
+          
+          results$amc <- list(
+            topup = topup,
+            lifecycle = T,
+            units_vec = units_vec,
+            units_to_cover_total = covered_units,
+            amc_size_undiscounted = amc,
+            expected_amc = expected_amc,
+            covers_prize = amc_covers_prize
+          )
+        }
+      }
+    }
+    
+    # ---- Hybrid calculations (if requested) ----
+    results$hybrid <- NULL
+    if (!is.null(input$mechanisms) && 'hybrid' %in% input$mechanisms) {
+      # Calculate the split
+      split_ratio <- input$hybrid_split / 100
+      upfront_prize <- results$shared_prize * split_ratio
+      amc_target <- results$shared_prize * (1 - split_ratio)
+      
+      # Build units vector from adoption_curve (monthly units)
+      ac <- adoption_curve()
+      units_vec <- ac$units
+      T <- nrow(ac)
+      
+      # Convert AMC target to dollars
+      unit_factor <- switch(input$cost_unit,
+                            "M" = 1e6,
+                            "K" = 1e3,
+                            "B" = 1e9,
+                            "1" = 1)
+      
+      topup <- ifelse(is.null(input$amc_topup), 0, input$amc_topup)
+      amc_target_val <- amc_target * unit_factor
+      first_month_payout <- ceiling( results$tot_duration * 12 )
+      
+      ac <- ac %>% 
+        mutate(month = month + first_month_payout,
+               monthly_rate = 1/( ((1 + discount_rate)^(1/12)) ^ month)) %>% 
+        mutate(paid_amount = topup * units * monthly_rate,
+               cumulative_payment = cumsum(paid_amount),
+               exceeds_amc_target = cumulative_payment > amc_target_val)
+      
+      # Check if AMC covers its portion
+      max_cumulative <- max(ac$cumulative_payment)
+      amc_covers_target <- max_cumulative >= amc_target_val
+      
+      if (!amc_covers_target) {
+        covered_units <- 0
+        amc_component <- 0
+      } else {
+        ac <- ac %>% 
+          mutate(lag = lag(exceeds_amc_target),
+                 lag = replace_na(lag, FALSE)) %>% 
+          filter(!lag)
+        
+        covered_units <- sum(ac$units)
+        amc_component <- (covered_units * topup) / unit_factor
+      }
+      
+      total_hybrid <- upfront_prize + amc_component
+      expected_hybrid <- total_hybrid * results$global_pos
+      
+      results$hybrid <- list(
+        split_ratio = split_ratio,
+        upfront_prize = upfront_prize,
+        amc_target = amc_target,
+        amc_component = amc_component,
+        total_hybrid = total_hybrid,
+        expected_hybrid = expected_hybrid,
+        units_to_cover_target = covered_units,
+        amc_covers_target = amc_covers_target
+      )
+    }
+    
+    
+    return(results)
+  }, ignoreNULL = FALSE)
+
+  
+  # Dynamic instruction text for stage data
+  output$stage_instructions <- renderUI({
+    unit_name <- get_unit_name()
+    div(class = "instruction-text",
+        HTML(paste0("<strong>Stage Name:</strong> Name or label for each stage (e.g., 'Discovery', 'Phase 1 Trial')<br>",
+                    "<strong>Duration:</strong> Length of the stage in years<br>",
+                    "<strong>Cost:</strong> Total cost for this stage in ", unit_name, "<br>",
+                    "<strong>Probability:</strong> Probability of success for this stage (0 to 1)<br>",
+                    "<strong>Share of costs covered by other sources:</strong> Proportion of costs funded by sources other than the prize (0 to 1, where 0 = no other funding, 1 = fully funded by others)"))
+    )
+  })
+  
+  DF <- reactive({
+    # Get current data - either from edited table or default
+    if (!is.null(input$stages_table)) {
+      current_data <- hot_to_r(input$stages_table)
+    } else {
+      current_data <- data.frame(
+        Stage = 1:4,
+        `Stage Name` = c("Prototyping", "R&D", "Clinical trials", "Regulatory approval"),
+        Duration = c(2, 1.5, 1.4, 0.8),
+        Cost = c(6.08, 3.72, 3.64, 0.61),
+        Probability = c(0.4, 0.8, 0.6, 0.9),
+        `Share of costs covered by other sources` = c(0.8, 0.8, 0.8, 0.5),
+        stringsAsFactors = FALSE,
+        check.names = FALSE
+      )
+    }
+    
+    # Adjust for number of stages
+    n <- input$num_stages
+    current_rows <- nrow(current_data)
+    
+    if (n > current_rows) {
+      # Add new rows
+      extra <- n - current_rows
+      new_rows <- data.frame(
+        Stage = (current_rows + 1):n,
+        `Stage Name` = paste("Stage", (current_rows + 1):n),
+        Duration = rep(1, extra),
+        Cost = rep(10, extra),
+        Probability = rep(0.8, extra),
+        `Share of costs covered by other sources` = rep(0.0, extra),
+        stringsAsFactors = FALSE,
+        check.names = FALSE
+      )
+      current_data <- rbind(current_data, new_rows)
+    } else if (n < current_rows) {
+      # Remove rows
+      current_data <- current_data[1:n, ]
+    }
+    
+    # Ensure Stage column is sequential
+    current_data$Stage <- 1:nrow(current_data)
+    current_data
+  })
+  
+  output$stages_table <- renderRHandsontable({
+    rhandsontable(DF(), rowHeaders = NULL, stretchH = "all", width = "100%") %>%
+      hot_col(1, readOnly = TRUE, width = 50) %>%  # Stage column
+      hot_col(2, width = 120) %>%  # Stage Name column
+      hot_col(3, width = 80) %>%  # Duration column
+      hot_col(4, width = 70) %>%  # Cost column
+      hot_col(5, width = 90) %>%  # Probability column
+      hot_col(6, width = 120)     # Share of costs column
+  })
+  
+  # Save archetype button
+  observeEvent(input$save_archetype, {
+    req(input$archetype_name)
+    
+    archetype_name <- trimws(input$archetype_name)
+    
+    if (archetype_name == "") {
+      showNotification("Please enter a name for the archetype", type = "warning")
+      return()
+    }
+    
+    # Get current results from the reactive
+    results <- calculated_results()
+    
+    # Store the archetype with all necessary data
+    saved_archetypes$data[[archetype_name]] <- list(
+      name = archetype_name,
+      results = results,
+      timestamp = Sys.time()
+    )
+    
+    # Update the selectInput choices
+    updateSelectInput(session, "selected_archetypes", 
+                      choices = names(saved_archetypes$data),
+                      selected = names(saved_archetypes$data))
+    
+    # Clear the name input
+    updateTextInput(session, "archetype_name", value = "")
+    
+    showNotification(paste("Saved:", archetype_name), type = "message")
+  })
+  
+  # Clear all archetypes
+  observeEvent(input$clear_archetypes, {
+    saved_archetypes$data <- list()
+    updateSelectInput(session, "selected_archetypes", choices = NULL, selected = NULL)
+    showNotification("All saved archetypes cleared", type = "message")
+  })
+  
+  # Notify if more than 4 archetypes selected
+  observe({
+    if (!is.null(input$selected_archetypes) && length(input$selected_archetypes) > 4) {
+      showNotification("Only the first 4 archetypes will be displayed", type = "warning", duration = 3)
+    }
+  })
+  
+  # Show expanded plot in modal
+  observeEvent(input$expand_plot, {
+    showModal(modalDialog(
+      title = div(
+        style = "display: flex; justify-content: space-between; align-items: center;",
+        span("Probability vs Prize Cost", 
+             style = "font-size: 1.5rem; font-weight: 700; color: #790F74;"),
+        actionButton("close_modal", "✕", 
+                     style = "background: none; border: none; font-size: 24px; 
+                             color: #718096; cursor: pointer; padding: 0;",
+                     onclick = "Shiny.setInputValue('close_expanded_plot', Math.random())")
+      ),
+      plotlyOutput("prize_plot_expanded", height = "calc(90vh - 100px)"),
+      size = "xl",
+      easyClose = TRUE,
+      footer = NULL
+    ))
+  })
+  
+  # Close modal handler
+  observeEvent(input$close_expanded_plot, {
+    removeModal()
+  })
+
+  # Helper to calculate AMC size for a given n
+  calculate_amc_for_n <- function(n, prob_of_success, cost_to_attempt, discount_rate, 
+                                  tot_duration, topup, ac_template, unit_factor) {
+    # Check if ac_template is valid
+    if (is.null(ac_template) || nrow(ac_template) == 0) {
+      return(list(amc_size = 0, global_pos = 0, covers = FALSE))
+    }
+    
+    # Calculate global PoS for this n
+    base_global_pos <- 1 - (1 - prob_of_success)^n
+    
+    # Calculate the shared prize for THIS n (not a fixed value)
+    shared_prize <- expected_shared_prize(n, prob_of_success, cost_to_attempt)
+    shared_prize_val <- shared_prize * unit_factor
+    
+    # Use the adoption curve template
+    ac <- ac_template %>%
+      mutate(month = month + ceiling(tot_duration * 12),
+             monthly_rate = 1/( ((1 + discount_rate)^(1/12)) ^ month)) %>%
+      mutate(paid_amount = topup * units * monthly_rate,
+             cumulative_payment = cumsum(paid_amount),
+             exceeds_prize_cost = cumulative_payment > shared_prize_val)
+    
+    max_cumulative <- max(ac$cumulative_payment)
+    amc_covers_prize <- max_cumulative >= shared_prize_val
+    
+    if (!amc_covers_prize) {
+      return(list(amc_size = 0, global_pos = base_global_pos, covers = FALSE))
+    }
+    
+    ac <- ac %>%
+      mutate(lag = lag(exceeds_prize_cost),
+             lag = replace_na(lag, FALSE)) %>%
+      filter(!lag)
+    
+    covered_units <- sum(ac$units)
+    amc_size <- (covered_units * topup) / unit_factor
+    
+    return(list(amc_size = amc_size, global_pos = base_global_pos, covers = TRUE))
+  }
+  
+  # Helper to calculate Hybrid for a given n
+  calculate_hybrid_for_n <- function(n, prob_of_success, cost_to_attempt, discount_rate,
+                                     tot_duration, topup, ac_template, unit_factor, split_ratio) {
+    # Check if ac_template is valid
+    if (is.null(ac_template) || nrow(ac_template) == 0) {
+      return(list(total_hybrid = 0, global_pos = 0, covers = FALSE))
+    }
+    
+    # Calculate base values
+    base_global_pos <- 1 - (1 - prob_of_success)^n
+    shared_prize <- expected_shared_prize(n, prob_of_success, cost_to_attempt)
+    
+    upfront_prize <- shared_prize * split_ratio
+    amc_target <- shared_prize * (1 - split_ratio)
+    amc_target_val <- amc_target * unit_factor
+    
+    # Calculate AMC component
+    ac <- ac_template %>%
+      mutate(month = month + ceiling(tot_duration * 12),
+             monthly_rate = 1/( ((1 + discount_rate)^(1/12)) ^ month)) %>%
+      mutate(paid_amount = topup * units * monthly_rate,
+             cumulative_payment = cumsum(paid_amount),
+             exceeds_amc_target = cumulative_payment > amc_target_val)
+    
+    max_cumulative <- max(ac$cumulative_payment)
+    amc_covers_target <- max_cumulative >= amc_target_val
+    
+    if (!amc_covers_target) {
+      return(list(total_hybrid = upfront_prize, global_pos = base_global_pos, covers = FALSE))
+    }
+    
+    ac <- ac %>%
+      mutate(lag = lag(exceeds_amc_target),
+             lag = replace_na(lag, FALSE)) %>%
+      filter(!lag)
+    
+    covered_units <- sum(ac$units)
+    amc_component <- (covered_units * topup) / unit_factor
+    total_hybrid <- upfront_prize + amc_component
+    
+    return(list(total_hybrid = total_hybrid, global_pos = base_global_pos, covers = TRUE))
+  }
+  
+  # Helper function to generate the plot (reusable for both regular and expanded views)
+  generate_prize_plot <- function() {
+    results <- calculated_results()
+    unit_label <- get_unit_label()
+    plot_mech <- input$plot_mechanism
+    
+    # Get prob_of_success and cost_to_attempt from results
+    prob_of_success <- results$prob_of_success
+    cost_to_attempt <- results$cost_to_attempt
+    use_feasibility <- results$use_feasibility
+    eta <- results$eta
+    
+    # Determine the maximum achievable probability for current
+    max_achievable_prob <- if(use_feasibility) eta else 1.0
+    
+    # Check all selected archetypes to find the overall max achievable probability
+    overall_max_achievable <- max_achievable_prob
+    if (!is.null(input$selected_archetypes) && length(input$selected_archetypes) > 0) {
+      for (name in input$selected_archetypes) {
+        arch <- saved_archetypes$data[[name]]
+        if (!is.null(arch)) {
+          arch_max <- if(arch$results$use_feasibility) arch$results$eta else 1.0
+          overall_max_achievable <- max(overall_max_achievable, arch_max)
+        }
+      }
+    }
+    
+    # Check if current matches any selected archetype
+    current_matches_archetype <- FALSE
+    if (!is.null(input$selected_archetypes) && length(input$selected_archetypes) > 0) {
+      for (name in input$selected_archetypes) {
+        arch <- saved_archetypes$data[[name]]
+        if (!is.null(arch)) {
+          if (abs(arch$results$prob_of_success - prob_of_success) < 1e-10 &&
+              abs(arch$results$cost_to_attempt - cost_to_attempt) < 1e-6) {
+            current_matches_archetype <- TRUE
+            break
+          }
+        }
+      }
+    }
+    
+    # Calculate n_max
+    target_prob_for_calc <- max_achievable_prob * 0.99
+    
+    if (prob_of_success < 1) {
+      n_max <- ceiling(log(1 - target_prob_for_calc) / log(1 - prob_of_success))
+    } else {
+      n_max <- 1
+    }
+    n_max <- max(n_max, results$n_firms + 5)
+    n_max <- min(n_max, 100)
+    
+    # Create vector of n values
+    n_values <- 1:n_max
+    
+    # Create the plot
+    p <- plot_ly()
+    
+    # Plot based on selected mechanism
+    if (plot_mech == "shared") {
+      # Calculate shared prize data
+      plot_data <- data.frame(n = n_values) %>%
+        rowwise() %>%
+        mutate(
+          base_global_pos = 1 - (1 - prob_of_success)^n,
+          global_pos = if(use_feasibility) min(base_global_pos * eta, eta) else base_global_pos,
+          shared_prize = expected_shared_prize(n, prob_of_success, cost_to_attempt)
+        ) %>%
+        ungroup()
+      
+      # Only add current if not matching archetype
+      if (!current_matches_archetype) {
+        p <- p %>% add_trace(
+          data = plot_data,
+          x = ~shared_prize, 
+          y = ~global_pos,
+          text = ~paste("Current<br>Attempts:", n, 
+                        "<br>Global PoS:", sprintf("%.1f%%", global_pos * 100),
+                        "<br>Shared Prize: $", paste0(format(round(shared_prize, 1), big.mark = ","), substr(unit_label, 2, 2))),
+          hoverinfo = "text",
+          type = 'scatter', 
+          mode = 'lines+markers',
+          line = list(color = '#764ba2', width = 3),
+          marker = list(color = '#764ba2', size = 8),
+          name = "Current",
+          showlegend = TRUE
+        )
+        
+        p <- p %>% add_markers(
+          x = results$shared_prize,
+          y = results$global_pos,
+          marker = list(
+            color = '#FFFFFF',
+            size = 14,
+            line = list(color = '#764ba2', width = 3)
+          ),
+          name = 'Current Selection',
+          text = paste("Current Selection<br>Attempts:", results$n_firms,
+                       "<br>Global PoS:", sprintf("%.1f%%", results$global_pos * 100),
+                       "<br>Shared Prize: $", paste0(format(round(results$shared_prize, 1), big.mark = ","), substr(unit_label, 2, 2))),
+          hoverinfo = "text",
+          showlegend = TRUE
+        )
+      }
+      
+      x_label <- paste0("Shared Prize Cost (", unit_label, ")")
+      
+    } else if (plot_mech == "amc") {
+      # Check if AMC is available
+      if (is.null(results$amc)) {
+        return(plot_ly() %>% layout(
+          title = "AMC parameters required",
+          xaxis = list(title = ""),
+          yaxis = list(title = "")
+        ))
+      }
+      
+      # Get AMC parameters
+      unit_factor <- switch(results$cost_unit,
+                            "M" = 1e6,
+                            "K" = 1e3,
+                            "B" = 1e9,
+                            "1" = 1)
+      topup <- results$amc$topup
+      ac_template <- adoption_curve()
+      
+      if (is.null(ac_template) || nrow(ac_template) == 0) {
+        return(plot_ly() %>% layout(
+          title = "Adoption curve data not available",
+          xaxis = list(title = ""),
+          yaxis = list(title = "")
+        ))
+      }
+      
+      # Calculate AMC data
+      plot_data <- data.frame(n = n_values) %>%
+        rowwise() %>%
+        mutate(
+          amc_calc = list(calculate_amc_for_n(n, prob_of_success, cost_to_attempt, 
+                                              input$discount_rate, results$tot_duration,
+                                              topup, ac_template, unit_factor))
+        ) %>%
+        ungroup() %>%
+        mutate(
+          amc_size = map_dbl(amc_calc, ~.x$amc_size),
+          global_pos = map_dbl(amc_calc, ~.x$global_pos),
+          covers = map_lgl(amc_calc, ~.x$covers)
+        ) %>%
+        filter(covers) %>%
+        select(-amc_calc)
+      
+      if (nrow(plot_data) == 0) {
+        return(plot_ly() %>% layout(
+          title = "AMC never covers prize cost with current parameters",
+          xaxis = list(title = ""),
+          yaxis = list(title = "")
+        ))
+      }
+      
+      # Apply feasibility if needed
+      if (use_feasibility) {
+        plot_data <- plot_data %>%
+          mutate(global_pos = pmin(global_pos * eta, eta))
+      }
+      
+      if (!current_matches_archetype && !is.null(results$amc) && results$amc$covers_prize) {
+        p <- p %>% add_trace(
+          data = plot_data,
+          x = ~amc_size, 
+          y = ~global_pos,
+          text = ~paste("Current<br>Attempts:", n, 
+                        "<br>Global PoS:", sprintf("%.1f%%", global_pos * 100),
+                        "<br>AMC: $", paste0(format(round(amc_size, 1), big.mark = ","), substr(unit_label, 2, 2))),
+          hoverinfo = "text",
+          type = 'scatter', 
+          mode = 'lines+markers',
+          line = list(color = '#764ba2', width = 3),
+          marker = list(color = '#764ba2', size = 8),
+          name = "Current",
+          showlegend = TRUE
+        )
+        
+        p <- p %>% add_markers(
+          x = results$amc$amc_size_undiscounted,
+          y = results$global_pos,
+          marker = list(
+            color = '#FFFFFF',
+            size = 14,
+            line = list(color = '#764ba2', width = 3)
+          ),
+          name = 'Current Selection',
+          text = paste("Current Selection<br>Attempts:", results$n_firms,
+                       "<br>Global PoS:", sprintf("%.1f%%", results$global_pos * 100),
+                       "<br>AMC: $", paste0(format(round(results$amc$amc_size_undiscounted, 1), big.mark = ","), substr(unit_label, 2, 2))),
+          hoverinfo = "text",
+          showlegend = TRUE
+        )
+      }
+      
+      x_label <- paste0("AMC Cost (", unit_label, ")")
+      
+    } else if (plot_mech == "hybrid") {
+      # Check if Hybrid is available
+      if (is.null(results$hybrid)) {
+        return(plot_ly() %>% layout(
+          title = "Hybrid parameters required",
+          xaxis = list(title = ""),
+          yaxis = list(title = "")
+        ))
+      }
+      
+      if (is.null(results$amc)) {
+        return(plot_ly() %>% layout(
+          title = "AMC parameters required for Hybrid",
+          xaxis = list(title = ""),
+          yaxis = list(title = "")
+        ))
+      }
+      
+      
+      # Get Hybrid parameters
+      unit_factor <- switch(results$cost_unit,
+                            "M" = 1e6,
+                            "K" = 1e3,
+                            "B" = 1e9,
+                            "1" = 1)
+      topup <- results$amc$topup
+      ac_template <- adoption_curve()
+      split_ratio <- results$hybrid$split_ratio
+      
+      # Verify ac_template is valid
+      if (is.null(ac_template) || nrow(ac_template) == 0) {
+        return(plot_ly() %>% layout(
+          title = "Adoption curve data not available",
+          xaxis = list(title = ""),
+          yaxis = list(title = "")
+        ))
+      }
+      
+      # Calculate Hybrid data
+      plot_data <- data.frame(n = n_values) %>%
+        rowwise() %>%
+        mutate(
+          hybrid_calc = list(calculate_hybrid_for_n(n, prob_of_success, cost_to_attempt,
+                                                    input$discount_rate, results$tot_duration,
+                                                    topup, ac_template, unit_factor, split_ratio))
+        ) %>%
+        ungroup() %>%
+        mutate(
+          total_hybrid = map_dbl(hybrid_calc, ~.x$total_hybrid),
+          global_pos = map_dbl(hybrid_calc, ~.x$global_pos),
+          covers = map_lgl(hybrid_calc, ~.x$covers)
+        ) %>%
+        filter(covers) %>%
+        select(-hybrid_calc)
+      
+      if (nrow(plot_data) == 0) {
+        return(plot_ly() %>% layout(
+          title = "Hybrid AMC component never covers target with current parameters",
+          xaxis = list(title = ""),
+          yaxis = list(title = "")
+        ))
+      }
+      
+      # Apply feasibility if needed
+      if (use_feasibility) {
+        plot_data <- plot_data %>%
+          mutate(global_pos = pmin(global_pos * eta, eta))
+      }
+      
+      if (!current_matches_archetype && !is.null(results$hybrid) && results$hybrid$amc_covers_target) {
+        p <- p %>% add_trace(
+          data = plot_data,
+          x = ~total_hybrid, 
+          y = ~global_pos,
+          text = ~paste("Current<br>Attempts:", n, 
+                        "<br>Global PoS:", sprintf("%.1f%%", global_pos * 100),
+                        "<br>Hybrid: $", paste0(format(round(total_hybrid, 1), big.mark = ","), substr(unit_label, 2, 2))),
+          hoverinfo = "text",
+          type = 'scatter', 
+          mode = 'lines+markers',
+          line = list(color = '#764ba2', width = 3),
+          marker = list(color = '#764ba2', size = 8),
+          name = "Current",
+          showlegend = TRUE
+        )
+        
+        p <- p %>% add_markers(
+          x = results$hybrid$total_hybrid,
+          y = results$global_pos,
+          marker = list(
+            color = '#FFFFFF',
+            size = 14,
+            line = list(color = '#764ba2', width = 3)
+          ),
+          name = 'Current Selection',
+          text = paste("Current Selection<br>Attempts:", results$n_firms,
+                       "<br>Global PoS:", sprintf("%.1f%%", results$global_pos * 100),
+                       "<br>Hybrid: $", paste0(format(round(results$hybrid$total_hybrid, 1), big.mark = ","), substr(unit_label, 2, 2))),
+          hoverinfo = "text",
+          showlegend = TRUE
+        )
+      }
+      
+      x_label <- paste0("Hybrid Total Cost (", unit_label, ")")
+    }
+    
+    # Add saved archetypes if selected (only same mechanism)
+    if (!is.null(input$selected_archetypes) && length(input$selected_archetypes) > 0) {
+      colors <- c('#790F74', '#D7B1DD', '#4a5568', '#a0aec0')
+      selected_archetypes <- input$selected_archetypes[1:min(4, length(input$selected_archetypes))]
+      
+      for (i in seq_along(selected_archetypes)) {
+        name <- selected_archetypes[i]
+        arch <- saved_archetypes$data[[name]]
+        
+        if (!is.null(arch)) {
+          arch_results <- arch$results
+          
+          # Check if archetype has the selected mechanism
+          has_mechanism <- FALSE
+          if (plot_mech == "shared" && !is.null(arch_results$shared_prize)) has_mechanism <- TRUE
+          if (plot_mech == "amc" && !is.null(arch_results$amc)) has_mechanism <- TRUE
+          if (plot_mech == "hybrid" && !is.null(arch_results$hybrid)) has_mechanism <- TRUE
+          
+          if (!has_mechanism) next
+          
+          arch_prob <- arch_results$prob_of_success
+          arch_cost <- arch_results$cost_to_attempt
+          arch_use_feas <- arch_results$use_feasibility
+          arch_eta <- arch_results$eta
+          
+          arch_unit <- arch_results$cost_unit
+          arch_unit_label <- switch(arch_unit,
+                                    "M" = "$M",
+                                    "K" = "$K",
+                                    "B" = "$B",
+                                    "1" = "$")
+          
+          arch_max_achievable <- if(arch_use_feas) arch_eta else 1.0
+          arch_target_prob <- arch_max_achievable * 0.99
+          
+          if (arch_prob < 1) {
+            arch_n_max <- ceiling(log(1 - arch_target_prob) / log(1 - arch_prob))
+          } else {
+            arch_n_max <- 1
+          }
+          arch_n_max <- max(arch_n_max, arch_results$n_firms + 5)
+          arch_n_max <- min(arch_n_max, 100)
+          
+          arch_n_values <- 1:arch_n_max
+          
+          color_idx <- ((i - 1) %% length(colors)) + 1
+          
+          # Plot archetype based on mechanism
+          if (plot_mech == "shared") {
+            arch_data <- data.frame(n = arch_n_values) %>%
+              rowwise() %>%
+              mutate(
+                base_global_pos = 1 - (1 - arch_prob)^n,
+                global_pos = if(arch_use_feas) min(base_global_pos * arch_eta, arch_eta) else base_global_pos,
+                shared_prize = expected_shared_prize(n, arch_prob, arch_cost)
+              ) %>%
+              ungroup()
+            
+            p <- p %>% add_trace(
+              data = arch_data,
+              x = ~shared_prize,
+              y = ~global_pos,
+              text = ~paste(name, "<br>Attempts:", n,
+                            "<br>Global PoS:", sprintf("%.1f%%", global_pos * 100),
+                            "<br>Shared Prize: $", paste0(format(round(shared_prize, 1), big.mark = ","), substr(arch_unit_label, 2, 2))),
+              hoverinfo = "text",
+              type = 'scatter',
+              mode = 'lines+markers',
+              line = list(color = colors[color_idx], width = 2),
+              marker = list(color = colors[color_idx], size = 6),
+              name = name,
+              showlegend = TRUE
+            )
+            
+            p <- p %>% add_markers(
+              x = arch_results$shared_prize,
+              y = arch_results$global_pos,
+              marker = list(
+                color = colors[color_idx],
+                size = 10,
+                symbol = 'diamond'
+              ),
+              name = paste(name, "selection"),
+              text = paste(name, "Selection<br>Attempts:", arch_results$n_firms,
+                           "<br>Global PoS:", sprintf("%.1f%%", arch_results$global_pos * 100),
+                           "<br>Shared Prize: $", paste0(format(round(arch_results$shared_prize, 1), big.mark = ","), substr(arch_unit_label, 2, 2))),
+              hoverinfo = "text",
+              showlegend = FALSE
+            )
+          } else if (plot_mech == "amc" && !is.null(arch_results$amc) && arch_results$amc$covers_prize) {
+            # Calculate AMC curve for archetype
+            arch_unit_factor <- switch(arch_unit,
+                                       "M" = 1e6,
+                                       "K" = 1e3,
+                                       "B" = 1e9,
+                                       "1" = 1)
+            
+            # Need to recreate adoption curve for this archetype - skip if not available
+            # This is simplified - in production you'd want to store AMC params with archetype
+            next
+            
+          } else if (plot_mech == "hybrid" && !is.null(arch_results$hybrid) && arch_results$hybrid$amc_covers_target) {
+            # Similar for hybrid
+            next
+          }
+        }
+      }
+    }
+    
+    # Use overall_max_achievable for y-axis instead of just current
+    y_max <- overall_max_achievable * 1.02
+    
+    # Layout
+    p %>% layout(
+      xaxis = list(title = x_label, 
+                   gridcolor = '#f0f0f0',
+                   tickformat = ",.0f",
+                   titlefont = list(family = 'Inter', size = 14, color = '#4a5568', weight = 600)),
+      yaxis = list(title = "Probability At Least One Firm Succeeds", 
+                   gridcolor = '#f0f0f0',
+                   tickformat = ".0%",
+                   range = c(0, y_max),
+                   titlefont = list(family = 'Inter', size = 14, color = '#4a5568', weight = 600)),
+      plot_bgcolor = '#ffffff',
+      paper_bgcolor = '#ffffff',
+      font = list(family = "Inter, sans-serif", size = 12, color = '#4a5568'),
+      hovermode = 'closest',
+      showlegend = TRUE,
+      legend = list(
+        orientation = "v",
+        x = 1.02,
+        xanchor = "left",
+        y = 0.5,
+        yanchor = "middle",
+        bgcolor = "rgba(255,255,255,0.9)",
+        bordercolor = "#e2e8f0",
+        borderwidth = 1,
+        font = list(family = 'Inter', size = 11)
+      ),
+      margin = list(t = 30, r = 120, b = 60, l = 60),
+      autosize = TRUE
+    ) %>%
+      config(displayModeBar = FALSE, responsive = TRUE)
+  }
+  
+  output$results <- renderUI({
+    results <- calculated_results()
+    unit_label <- get_unit_label()
+    
+    # ==== Get data for calculations ====
+    df <- hot_to_r(input$stages_table)
+    summary_duration <- sum(df$Duration)
+    summary_cost <- sum(df$Cost)
+    summary_prob <- results$prob_of_success
+    summary_push <- results$push_funding
+    
+    # ==== INCENTVE MECHANISMS SUMMARY (Purple Cards) ====
+    incentive_display <- div(
+      
+      # Section Header
+      div(
+        h4("Incentive Mechanisms Summary",
+           style = "background: linear-gradient(135deg, #790F74, #a855f7);
+            background-clip: text;
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-top: 0;
+            margin-bottom: 15px;
+            font-size: 1.7rem; font-weight: 800;"),
+        tags$div(style = "width: 80px; height: 3px; background: linear-gradient(90deg, #790F74, #a855f7); border-radius: 2px; margin-bottom: 25px;")
+      ),
+      
+      # Advanced settings indicator if enabled
+      if(results$use_feasibility) {
+        div(
+          style = "background: linear-gradient(135deg, rgba(168, 85, 247, 0.1), rgba(236, 72, 153, 0.1)); 
+              padding: 12px 16px; border-radius: 10px; margin-bottom: 20px;
+              border-left: 3px solid #a855f7;",
+          p(style = "margin: 0; font-size: 13px; color: #4a5568; font-weight: 500;",
+            HTML(sprintf("⚙️ <strong>Advanced settings enabled:</strong> Global possibility (η = %.0f%%)", results$eta * 100))))
+      },
+      
+      # Purple gradient container for the cards
+      div(
+        style = "background: linear-gradient(135deg, #790F74 0%, #a855f7 100%);
+             padding: 30px;
+             border-radius: 16px;
+             box-shadow: 0 10px 40px rgba(121, 15, 116, 0.4);
+             margin-bottom: 30px;",
+        
+        # Container for the cards (shows all selected mechanisms)
+        div(
+          style = "display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 20px;",
+          
+          # CARD: NUMBER OF FIRMS (always shown)
+          div(
+            style = "padding: 24px;
+         border-left: 4px solid rgba(255,255,255,0.5);
+         background-color: rgba(255,255,255,0.1);
+         backdrop-filter: blur(10px);
+         border-radius: 12px;
+         display: flex; flex-direction: column;
+         transition: all 0.3s ease;
+         cursor: default;",
+            onmouseover = "this.style.backgroundColor='rgba(255,255,255,0.15)'; this.style.transform='translateY(-5px)';",
+            onmouseout = "this.style.backgroundColor='rgba(255,255,255,0.1)'; this.style.transform='translateY(0)';",
+            
+            div("Number of Firms Incentivized",
+                style = "font-size: 11px; color: rgba(255,255,255,0.9);
+                 text-transform: uppercase; letter-spacing: 1px;
+                 margin-bottom: 12px; font-weight: 600;"),
+            
+            div(results$n_firms,
+                style = "font-size: 32px; font-weight: 800; color: white;
+                 text-shadow: 0 2px 10px rgba(0,0,0,0.2);")
+          ),
+          
+          # CARD: GLOBAL PROBABILITY (always shown)
+          div(
+            style = "padding: 24px;
+         border-left: 4px solid rgba(255,255,255,0.5);
+         background-color: rgba(255,255,255,0.1);
+         backdrop-filter: blur(10px);
+         border-radius: 12px;
+         display: flex; flex-direction: column;
+         transition: all 0.3s ease;
+         cursor: default;",
+            onmouseover = "this.style.backgroundColor='rgba(255,255,255,0.15)'; this.style.transform='translateY(-5px)';",
+            onmouseout = "this.style.backgroundColor='rgba(255,255,255,0.1)'; this.style.transform='translateY(0)';",
+            
+            div("Probability At Least One Firm Succeeds",
+                style = "font-size: 11px; color: rgba(255,255,255,0.9);
+                 text-transform: uppercase; letter-spacing: 1px;
+                 margin-bottom: 12px; font-weight: 600;"),
+            
+            div(
+              div(sprintf('%.1f%%', results$global_pos * 100),
+                  style = "font-size: 32px; font-weight: 800; color: white;
+                   text-shadow: 0 2px 10px rgba(0,0,0,0.2);"),
+              
+              # Show target if different from actual
+              if (abs(results$global_pos - results$target_probability) > 0.001) {
+                div(sprintf('(Target: %.1f%%)', results$target_probability * 100),
+                    style = "font-size: 12px; font-weight: 500; color: rgba(255,255,255,0.8);
+                     margin-top: 6px;")
+              }
+            )
+          ),
+          
+          # CARD: SHARED PRIZE (only if "shared" is selected)
+          if (!is.null(input$mechanisms) && 'shared' %in% input$mechanisms) {
+            div(
+              style = "padding: 24px;
+           border-left: 4px solid rgba(255,255,255,0.5);
+           background-color: rgba(255,255,255,0.1);
+           backdrop-filter: blur(10px);
+           border-radius: 12px;
+           display: flex; flex-direction: column;
+           transition: all 0.3s ease;
+           cursor: default;",
+              onmouseover = "this.style.backgroundColor='rgba(255,255,255,0.15)'; this.style.transform='translateY(-5px)';",
+              onmouseout = "this.style.backgroundColor='rgba(255,255,255,0.1)'; this.style.transform='translateY(0)';",
+              
+              div("Shared Prize Amount",
+                  style = "font-size: 11px; color: rgba(255,255,255,0.9);
+               text-transform: uppercase; letter-spacing: 1px;
+               margin-bottom: 12px; font-weight: 600;"),
+              
+              div(
+                sprintf("$%s%s", format(round(results$shared_prize, 1), big.mark=","), substr(unit_label, 2, 2)),
+                style = "font-size: 32px; font-weight: 800; color: white;
+                 text-shadow: 0 2px 10px rgba(0,0,0,0.2);"),
+              
+              # Expected shared prize (smaller text below)
+              div(
+                sprintf("Expected: $%s%s", format(round(results$expected_shared_prize, 1), big.mark=","), substr(unit_label, 2, 2)),
+                style = "font-size: 14px; font-weight: 500; color: rgba(255,255,255,0.8);
+                 margin-top: 8px;")
+            )
+          },
+          
+          # CARD: AMC (only if "amc" is selected)
+          if (!is.null(input$mechanisms) && 'amc' %in% input$mechanisms) {
+            amc <- results$amc
+            has_error <- !is.null(amc) && !amc$covers_prize
+            
+            div(
+              style = paste0("padding: 24px;
+         border-left: 4px solid ", if(has_error) "rgba(239, 68, 68, 0.8)" else "rgba(255,255,255,0.5)", ";
+         background-color: ", if(has_error) "rgba(239, 68, 68, 0.15)" else "rgba(255,255,255,0.1)", ";
+         backdrop-filter: blur(10px);
+         border-radius: 12px;
+         display: flex; flex-direction: column;
+         transition: all 0.3s ease;
+         cursor: default;"),
+              onmouseover = if(has_error) {
+                "this.style.backgroundColor='rgba(239, 68, 68, 0.2)'; this.style.transform='translateY(-5px)';"
+              } else {
+                "this.style.backgroundColor='rgba(255,255,255,0.15)'; this.style.transform='translateY(-5px)';"
+              },
+              onmouseout = if(has_error) {
+                "this.style.backgroundColor='rgba(239, 68, 68, 0.15)'; this.style.transform='translateY(0)';"
+              } else {
+                "this.style.backgroundColor='rgba(255,255,255,0.1)'; this.style.transform='translateY(0)';"
+              },
+              
+              div("AMC Amount",
+                  style = "font-size: 11px; color: rgba(255,255,255,0.9);
+             text-transform: uppercase; letter-spacing: 1px;
+             margin-bottom: 12px; font-weight: 600;"),
+              
+              if (!is.null(amc)) {
+                div(
+                  div(
+                    if(has_error) {
+                      "—"
+                    } else {
+                      sprintf("$%s%s", 
+                              if (is.infinite(amc$amc_size_undiscounted)) "∞" else format(round(amc$amc_size_undiscounted, 1), big.mark = ","),
+                              substr(unit_label, 2, 2))
+                    },
+                    style = "font-size: 32px; font-weight: 800; color: white;
+                   text-shadow: 0 2px 10px rgba(0,0,0,0.2);"),
+                  
+                  # Covers units (smaller text below)
+                  div(
+                    if(has_error) {
+                      "Covers — units"
+                    } else {
+                      sprintf("Covers %s units", 
+                              if(is.infinite(amc$units_to_cover_total)) "∞" else format(round(amc$units_to_cover_total, 0), big.mark = ","))
+                    },
+                    style = "font-size: 13px; font-weight: 500; color: rgba(255,255,255,0.8);
+                   margin-top: 8px;"
+                  ),
+                  
+                  # Expected AMC (smaller text below)
+                  div(
+                    if(has_error) {
+                      "Expected: —"
+                    } else {
+                      sprintf("Expected: $%s%s", 
+                              if(is.infinite(amc$expected_amc)) "∞" else format(round(amc$expected_amc, 1), big.mark = ","), 
+                              substr(unit_label, 2, 2))
+                    },
+                    style = "font-size: 14px; font-weight: 500; color: rgba(255,255,255,0.8);
+                   margin-top: 4px;"
+                  ),
+                  
+                  # Error indicator
+                  if(has_error) {
+                    div("⚠️ Does not cover costs",
+                        style = "font-size: 11px; font-weight: 600; color: rgba(255,255,255,0.95);
+                       margin-top: 8px; text-transform: uppercase; letter-spacing: 0.5px;")
+                  }
+                )
+              } else {
+                div("AMC parameters required", 
+                    style = "font-size: 14px; color: rgba(255,255,255,0.8);")
+              }
+            )
+          },
+          
+          # CARD: HYBRID (only if "hybrid" is selected)
+          if (!is.null(input$mechanisms) && 'hybrid' %in% input$mechanisms) {
+            hybrid <- results$hybrid
+            has_error <- !is.null(hybrid) && !hybrid$amc_covers_target
+            
+            div(
+              style = paste0("padding: 24px;
+         border-left: 4px solid ", if(has_error) "rgba(239, 68, 68, 0.8)" else "rgba(255,255,255,0.5)", ";
+         background-color: ", if(has_error) "rgba(239, 68, 68, 0.15)" else "rgba(255,255,255,0.1)", ";
+         backdrop-filter: blur(10px);
+         border-radius: 12px;
+         display: flex; flex-direction: column;
+         transition: all 0.3s ease;
+         cursor: default;"),
+              onmouseover = if(has_error) {
+                "this.style.backgroundColor='rgba(239, 68, 68, 0.2)'; this.style.transform='translateY(-5px)';"
+              } else {
+                "this.style.backgroundColor='rgba(255,255,255,0.15)'; this.style.transform='translateY(-5px)';"
+              },
+              onmouseout = if(has_error) {
+                "this.style.backgroundColor='rgba(239, 68, 68, 0.15)'; this.style.transform='translateY(0)';"
+              } else {
+                "this.style.backgroundColor='rgba(255,255,255,0.1)'; this.style.transform='translateY(0)';"
+              },
+              
+              div("Hybrid Amount",
+                  style = "font-size: 11px; color: rgba(255,255,255,0.9);
+             text-transform: uppercase; letter-spacing: 1px;
+             margin-bottom: 12px; font-weight: 600;"),
+              
+              if (!is.null(hybrid)) {
+                div(
+                  div(
+                    if(has_error) {
+                      "—"
+                    } else {
+                      sprintf("$%s%s", 
+                              if (is.infinite(hybrid$total_hybrid)) "∞" else format(round(hybrid$total_hybrid, 1), big.mark = ","),
+                              substr(unit_label, 2, 2))
+                    },
+                    style = "font-size: 32px; font-weight: 800; color: white;
+                   text-shadow: 0 2px 10px rgba(0,0,0,0.2);"),
+                  
+                  # Breakdown (smaller text below)
+                  div(
+                    if(has_error) {
+                      sprintf("Upfront: $%s%s | AMC: —", 
+                              format(round(hybrid$upfront_prize, 1), big.mark = ","),
+                              substr(unit_label, 2, 2))
+                    } else {
+                      sprintf("Upfront: $%s%s | AMC: $%s%s", 
+                              format(round(hybrid$upfront_prize, 1), big.mark = ","),
+                              substr(unit_label, 2, 2),
+                              format(round(hybrid$amc_component, 1), big.mark = ","),
+                              substr(unit_label, 2, 2))
+                    },
+                    style = "font-size: 12px; font-weight: 500; color: rgba(255,255,255,0.8);
+                   margin-top: 8px;"
+                  ),
+                  
+                  # Covers units
+                  div(
+                    if(has_error) {
+                      "Covers — units"
+                    } else {
+                      sprintf("Covers %s units", 
+                              format(round(hybrid$units_to_cover_target, 0), big.mark = ","))
+                    },
+                    style = "font-size: 13px; font-weight: 500; color: rgba(255,255,255,0.8);
+                   margin-top: 4px;"
+                  ),
+                  
+                  # Expected hybrid
+                  div(
+                    if(has_error) {
+                      "Expected: —"
+                    } else {
+                      sprintf("Expected: $%s%s", 
+                              if(is.infinite(hybrid$expected_hybrid)) "∞" else format(round(hybrid$expected_hybrid, 1), big.mark = ","), 
+                              substr(unit_label, 2, 2))
+                    },
+                    style = "font-size: 14px; font-weight: 500; color: rgba(255,255,255,0.8);
+                   margin-top: 4px;"
+                  ),
+                  
+                  # Error indicator
+                  if(has_error) {
+                    div("⚠️ AMC does not cover target",
+                        style = "font-size: 11px; font-weight: 600; color: rgba(255,255,255,0.95);
+                       margin-top: 8px; text-transform: uppercase; letter-spacing: 0.5px;")
+                  }
+                )
+              } else {
+                div("Hybrid parameters required", 
+                    style = "font-size: 14px; color: rgba(255,255,255,0.8);")
+              }
+            )
+          }
+        )
+        
+      )
+        )
+    
+    # ==== AMC WARNING (if applicable) ====
+    amc_warning <- NULL
+    if (!is.null(input$mechanisms) && 'amc' %in% input$mechanisms) {
+      if (!is.null(results$amc) && !results$amc$covers_prize) {
+        amc_warning <- div(
+          class = "warning-box",
+          style = "margin-top: 20px; margin-bottom: 20px;",
+          p(class = "warning-text", 
+            HTML("⚠️ <strong>AMC Warning:</strong> The AMC will never cover the shared prize cost with the current parameters. The cumulative subsidy payments over the product lifecycle do not reach the prize amount. Consider increasing the top-up amount, lifecycle duration, or uptake rate."))
+        )
+      }
+    }
+    
+    # ==== Hybrid WARNING (if applicable) ====
+    hybrid_warning <- NULL
+    if (!is.null(input$mechanisms) && 'hybrid' %in% input$mechanisms) {
+      if (!is.null(results$hybrid) && !results$hybrid$amc_covers_target) {
+        hybrid_warning <- div(
+          class = "warning-box",
+          style = "margin-top: 20px; margin-bottom: 20px;",
+          p(class = "warning-text", 
+            HTML(sprintf("⚠️ <strong>Hybrid Warning:</strong> The AMC component will never cover its target amount ($%s%s) with the current parameters. The cumulative subsidy payments over the product lifecycle do not reach the required AMC portion. Consider increasing the top-up amount, lifecycle duration, uptake rate, or adjusting the split ratio.",
+                         format(round(results$hybrid$amc_target, 1), big.mark = ","),
+                         substr(unit_label, 2, 2))))
+        )
+      }
+    }
+        
+    # ==== INDIVIDUAL FIRM SUMMARY (Horizontal Strip Style) ====
+        
+        individual_firm_display <- div(
+          
+          # Section Header
+          div(
+            h4("Individual Firm Summary",
+               style = "background: linear-gradient(135deg, #790F74, #a855f7);
+                    background-clip: text;
+                    -webkit-background-clip: text;
+                    -webkit-text-fill-color: transparent;
+                    margin-top: 30px; margin-bottom: 15px;
+                    font-size: 1.7rem; font-weight: 800;"),
+            tags$div(style = "width: 80px; height: 3px; background: linear-gradient(90deg, #790F74, #a855f7); border-radius: 2px; margin-bottom: 25px;")
+          ),
+          
+          # Strip 1: Total Duration
+          div(
+            class = "firm-strip",
+            onmouseover = "this.style.transform='translateX(5px)'; this.style.boxShadow='0 6px 25px rgba(121, 15, 116, 0.25)';",
+            onmouseout = "this.style.transform='translateX(0)'; this.style.boxShadow='0 2px 10px rgba(0,0,0,0.05)';",
+            style = "display: flex; justify-content: space-between; align-items: center;
+                 background: linear-gradient(135deg, rgba(121, 15, 116, 0.08), rgba(215, 177, 221, 0.08));
+                 border-radius: 12px; padding: 20px 24px;
+                 font-family: 'Inter', sans-serif;
+                 margin-bottom: 16px; border-left: 4px solid #790F74;
+                 transition: all 0.3s ease;
+                 box-shadow: 0 2px 10px rgba(0,0,0,0.05);",
+            
+            div(
+              style = "font-size: 17px; color: #2d3748; font-weight: 600;",
+              "Total duration:"
+            ),
+            div(
+              style = "font-size: 24px; font-weight: 800; 
+                   background: linear-gradient(135deg, #790F74, #a855f7);
+                   background-clip: text;
+                   -webkit-background-clip: text;
+                   -webkit-text-fill-color: transparent;",
+              sprintf('%.1f years', summary_duration)
+            )
+          ),
+          
+          # Strip 2: Probability of Success
+          div(
+            class = "firm-strip",
+            onmouseover = "this.style.transform='translateX(5px)'; this.style.boxShadow='0 6px 25px rgba(121, 15, 116, 0.25)';",
+            onmouseout = "this.style.transform='translateX(0)'; this.style.boxShadow='0 2px 10px rgba(0,0,0,0.05)';",
+            style = "display: flex; justify-content: space-between; align-items: center;
+                 background: linear-gradient(135deg, rgba(121, 15, 116, 0.08), rgba(215, 177, 221, 0.08));
+                 border-radius: 12px; padding: 20px 24px;
+                 font-family: 'Inter', sans-serif;
+                 margin-bottom: 16px; border-left: 4px solid #790F74;
+                 transition: all 0.3s ease;
+                 box-shadow: 0 2px 10px rgba(0,0,0,0.05);",
+            
+            div(
+              style = "font-size: 17px; color: #2d3748; font-weight: 600;",
+              "Probability of success:"
+            ),
+            div(
+              style = "font-size: 24px; font-weight: 800;
+                   background: linear-gradient(135deg, #790F74, #a855f7);
+                   background-clip: text;
+                   -webkit-background-clip: text;
+                   -webkit-text-fill-color: transparent;",
+              sprintf('%.1f%%', summary_prob * 100)
+            )
+          ),
+          
+          # Strip 3: Expected Cost
+          div(
+            class = "firm-strip",
+            onmouseover = "this.style.transform='translateX(5px)'; this.style.boxShadow='0 6px 25px rgba(121, 15, 116, 0.25)';",
+            onmouseout = "this.style.transform='translateX(0)'; this.style.boxShadow='0 2px 10px rgba(0,0,0,0.05)';",
+            style = "display: flex; justify-content: space-between; align-items: center;
+                 background: linear-gradient(135deg, rgba(121, 15, 116, 0.08), rgba(215, 177, 221, 0.08));
+                 border-radius: 12px; padding: 20px 24px;
+                 font-family: 'Inter', sans-serif;
+                 margin-bottom: 16px; border-left: 4px solid #790F74;
+                 transition: all 0.3s ease;
+                 box-shadow: 0 2px 10px rgba(0,0,0,0.05);",
+            
+            div(
+              style = "font-size: 17px; color: #2d3748; font-weight: 600;",
+              "Expected cost (after push funding):"
+            ),
+            div(
+              style = "font-size: 24px; font-weight: 800; 
+                   background: linear-gradient(135deg, #790F74, #a855f7);
+                   background-clip: text;
+                   -webkit-background-clip: text;
+                   -webkit-text-fill-color: transparent;",
+              sprintf("$%s", format(round(results$cost_to_attempt, 1), big.mark=","))
+            )
+          )
+        )
+        
+    # ==== PUSH FUNDING SECTION (Collapsible) ====
+        
+        push_funding_section <- div(
+          style = "margin-top: 30px; margin-bottom: 30px;",
+          
+          # Button to toggle the content
+          actionButton("toggle_push_funding", 
+                       "What about push funding?",
+                       icon = icon("chevron-down"),
+                       style = "background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                               color: white;
+                               border: none;
+                               font-weight: 600;
+                               padding: 15px 25px;
+                               border-radius: 10px;
+                               font-family: 'Inter', sans-serif;
+                               font-size: 15px;
+                               box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3);
+                               transition: all 0.3s ease;
+                               width: 100%;
+                               text-align: left;"),
+          
+          # Collapsible content
+          uiOutput("push_funding_content")
+        )
+        
+        # Save Results section
+        save_section <- div(
+          hr(style = "border: none; height: 2px; background: linear-gradient(90deg, #790F74, transparent); margin: 30px 0;"),
+          div(
+            h3("Save Results", style = "font-size: 1.6rem; color: #790F74; font-weight: 700; margin-bottom: 15px;"),
+            tags$div(style = "width: 100px; height: 3px; background: linear-gradient(90deg, #790F74, #a855f7); border-radius: 2px; margin-bottom: 20px;")
+          ),
+          div(style = "background: linear-gradient(135deg, rgba(121, 15, 116, 0.05), rgba(215, 177, 221, 0.05)); 
+               padding: 24px; border-radius: 16px; border: 2px solid rgba(121, 15, 116, 0.1);",
+              p(style = "color: #4a5568; font-size: 13px; margin-bottom: 15px; line-height: 1.5;",
+                strong("Save scenarios to compare:"), " Give your current calculation a name and save it. You can then modify parameters and save additional scenarios. All saved scenarios will appear below and on the chart for easy comparison."),
+              textInput("archetype_name", "Archetype Name:", placeholder = "e.g., Baseline Scenario"),
+              actionButton("save_archetype", "Save Current Results", class = "btn-block purple-button", style = "margin-top: 15px;")
+          )
+        )
+        
+        # If archetypes are selected, show comparison
+        if (!is.null(input$selected_archetypes) && length(input$selected_archetypes) > 0) {
+          colors <- c('#790F74', '#D7B1DD', '#4a5568', '#a0aec0')
+          
+          # Limit to first 4 archetypes
+          selected_archetypes <- input$selected_archetypes[1:min(4, length(input$selected_archetypes))]
+          
+          comparison_items <- lapply(seq_along(selected_archetypes), function(i) {
+            name <- selected_archetypes[i]
+            arch <- saved_archetypes$data[[name]]
+            if (!is.null(arch)) {
+              # Get the unit for this archetype
+              arch_unit <- arch$results$cost_unit
+              arch_unit_label <- switch(arch_unit,
+                                        "M" = "$M",
+                                        "K" = "$K",
+                                        "B" = "$B",
+                                        "1" = "$")
+              
+              color_idx <- ((i - 1) %% length(colors)) + 1
+              div(
+                style = paste0("flex: 1; min-width: 240px; margin: 10px; padding: 24px; 
+                     background: white;
+                     border-radius: 16px; border-left: 4px solid ", colors[color_idx], ";
+                     box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+                     transition: all 0.3s ease;"),
+                h5(name, style = paste0("background: linear-gradient(135deg, ", colors[color_idx], ", ", colors[color_idx], "dd);
+                     background-clip: text;
+                     -webkit-background-clip: text;
+                     -webkit-text-fill-color: transparent;
+                     margin-bottom: 16px; margin-top: 0; font-size: 1.2rem; font-weight: 800;")),
+                tags$table(style = "width: 100%; font-size: 14px; font-family: 'Inter', sans-serif;",
+                           tags$tr(
+                             tags$td("Cost to attempt:", style = "padding: 8px 4px; color: #718096; font-weight: 500;"),
+                             tags$td(paste0("$", format(round(arch$results$cost_to_attempt, 1), big.mark = ",")), 
+                                     style = "text-align: right; padding: 8px 4px; font-weight: 700; color: #2d3748;")
+                           ),
+                           tags$tr(
+                             tags$td("Individual firm PoS:", style = "padding: 8px 4px; color: #718096; font-weight: 500;"),
+                             tags$td(sprintf("%.2f%%", arch$results$prob_of_success * 100), 
+                                     style = "text-align: right; padding: 8px 4px; font-weight: 700; color: #2d3748;")
+                           ),
+                           tags$tr(
+                             tags$td("Firms:", style = "padding: 8px 4px; color: #718096; font-weight: 500;"),
+                             tags$td(arch$results$n_firms, 
+                                     style = "text-align: right; padding: 8px 4px; font-weight: 700; color: #2d3748;")
+                           ),
+                           tags$tr(
+                             tags$td("Global PoS:", style = "padding: 8px 4px; color: #718096; font-weight: 500;"),
+                             tags$td(sprintf("%.2f%%", arch$results$global_pos * 100), 
+                                     style = "text-align: right; padding: 8px 4px; font-weight: 700; color: #2d3748;")
+                           ),
+                           tags$tr(
+                             tags$td("Shared Prize:", style = "padding: 8px 4px; color: #718096; font-weight: 500;"),
+                             tags$td(paste0("$", format(round(arch$results$shared_prize, 1), big.mark = ",")), 
+                                     style = "text-align: right; padding: 8px 4px; font-weight: 700; color: #2d3748;")
+                           )
+                )
+              )
+            }
+          })
+          
+          comparison_display <- div(
+            hr(style = "border: none; height: 2px; background: linear-gradient(90deg, #790F74, transparent); margin: 30px 0;"),
+            div(
+              h4("Saved Archetypes", style = "background: linear-gradient(135deg, #790F74, #a855f7);
+                   background-clip: text;
+                   -webkit-background-clip: text;
+                   -webkit-text-fill-color: transparent;
+                   font-weight: 800; font-size: 1.3rem;"),
+              tags$div(style = "width: 60px; height: 3px; background: linear-gradient(90deg, #790F74, #a855f7); border-radius: 2px; margin-bottom: 20px;")
+            ),
+            div(
+              style = "display: flex; flex-wrap: wrap; justify-content: flex-start; gap: 10px;",
+              comparison_items
+            )
+          )
+          
+          div(class = "results-container",
+              incentive_display,
+              amc_warning, 
+              hybrid_warning, 
+              individual_firm_display,
+              push_funding_section,
+              save_section,
+              comparison_display
+          )
+        } else {
+          div(class = "results-container", 
+              incentive_display,
+              amc_warning,  
+              hybrid_warning, 
+              individual_firm_display,
+              push_funding_section,
+              save_section)
+        }
+  })
+    
+    output$prize_plot <- renderPlotly({
+      generate_prize_plot()
+    })
+    
+    output$prize_plot_expanded <- renderPlotly({
+      generate_prize_plot()
+    })
+}
+
+shinyApp(ui = ui, server = server)
