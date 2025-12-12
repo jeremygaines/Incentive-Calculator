@@ -8,7 +8,6 @@ library(shinyjs)
 # Functions --------------------------------------------------------------------
 
 expected_shared_prize <- function(n, p, cost) {
-  
   k_vals <- 1:n
   probs <- choose(n - 1, k_vals - 1) * p^k_vals * (1 - p)^(n - k_vals)
   denom <- sum(probs / k_vals)
@@ -17,46 +16,53 @@ expected_shared_prize <- function(n, p, cost) {
   
 }
 
-# Calculate expected costs 
-calculate_project_metrics <- function(data, discount_rate, target_probability, 
-                                      use_feasibility = FALSE, eta = 1){
+# Calculate expected costs
+calculate_project_metrics <- function(data,
+                                      discount_rate,
+                                      target_probability,
+                                      use_feasibility = FALSE,
+                                      eta = 1) {
   print(eta)
   df = as_tibble(data)
   total_stages = max(data$Stage)
   
-  calc_df = df %>% 
-    rename(push_funding = `Share of costs covered by other sources (%)`) %>% 
-    mutate(push_funding = push_funding/100) %>% 
-    clean_names() %>% 
+  calc_df = df %>%
+    rename(push_funding = `Share of costs covered by other sources (%)`) %>%
+    mutate(push_funding = push_funding / 100) %>%
+    clean_names() %>%
     rename(prob = probability_percent) %>%
-    mutate(prob = prob / 100) %>% 
-    mutate(cumsum_prob = cumprod(prob),
-           cost_after_push = cost*(1-push_funding),
-           cumsum_duration = cumsum(duration)) %>% 
+    mutate(prob = prob / 100) %>%
+    mutate(
+      cumsum_prob = cumprod(prob),
+      cost_after_push = cost * (1 - push_funding),
+      cumsum_duration = cumsum(duration)
+    ) %>%
     mutate(
       # Convert costs into discounted amounts ....
-      disc_cost = pmap_dbl(
-        list(cost_after_push, duration, cumsum_duration),
-        \(cost_after_push, dur, cum_dur) {
-          dur_months <- round(dur * 12)
-          start_month <- round((cum_dur - dur) * 12) + 1
-          months <- seq(start_month, start_month + dur_months - 1)
-          monthly_rate <- (1 + discount_rate/100)^(1/12)
-          sum((cost_after_push / dur_months) * (monthly_rate ^ months))
-        }
-      )) %>% 
+      disc_cost = pmap_dbl(list(
+        cost_after_push, duration, cumsum_duration
+      ), \(cost_after_push, dur, cum_dur) {
+        dur_months <- round(dur * 12)
+        start_month <- round((cum_dur - dur) * 12) + 1
+        months <- seq(start_month, start_month + dur_months - 1)
+        monthly_rate <- (1 + discount_rate / 100)^(1 / 12)
+        sum((cost_after_push / dur_months) * (monthly_rate^months))
+      })
+    ) %>%
     # Calculate the exp. cost per stage ...
-    mutate(previous_prob = lag(prob),
-           previous_prob = replace_na(previous_prob, 1),
-           cumprod_prob = cumprod(previous_prob),
-           eta_adjustment = if (use_feasibility && nrow(df) > 1) {
-             ifelse(stage == 1, 1, eta)
-           } else {
-             1
-           },
-           expected_stage_cost = cumprod_prob*disc_cost*eta_adjustment)
+    mutate(
+      previous_prob = lag(prob),
+      previous_prob = replace_na(previous_prob, 1),
+      cumprod_prob = cumprod(previous_prob),
+      eta_adjustment = if (use_feasibility && nrow(df) > 1) {
+        ifelse(stage == 1, 1, eta)
+      } else {
+        1
+      },
+      expected_stage_cost = cumprod_prob * disc_cost * eta_adjustment
+    )
   
-  # Calculate individual firm PoS and costs ... 
+  # Calculate individual firm PoS and costs ...
   prob_of_success = prod(calc_df$prob)
   cost_to_attempt = sum(calc_df$expected_stage_cost)
   tot_duration = sum(calc_df$duration)
@@ -64,7 +70,11 @@ calculate_project_metrics <- function(data, discount_rate, target_probability,
   # target_probability is in percent (0–100) from the UI
   target_prop <- target_probability / 100  # now in [0,1]
   # Adjust for feasibility if enabled
-  target_base <- if (use_feasibility && eta > 0) target_prop / eta else target_prop
+  target_base <- if (use_feasibility &&
+                     eta > 0)
+    target_prop / eta
+  else
+    target_prop
   
   # Clamp between 0 and something just under 1
   target_base <- pmin(pmax(target_base, 0), 0.99999)
@@ -98,39 +108,45 @@ calculate_project_metrics <- function(data, discount_rate, target_probability,
   }
   
   # Calculate return values .....
-  guaranteed_prize = (cost_to_attempt/prob_of_success) * n_firms
+  guaranteed_prize = (cost_to_attempt / prob_of_success) * n_firms
   shared_prize = expected_shared_prize(n_firms, prob_of_success, cost_to_attempt)
   exp_shared_prize = shared_prize * global_pos
-  total_milestone_cost = n_firms*cost_to_attempt
-  wasted_milestone_cost = (1-global_pos) *  total_milestone_cost
+  total_milestone_cost = n_firms * cost_to_attempt
+  wasted_milestone_cost = (1 - global_pos) *  total_milestone_cost
   push_funding = sum(calc_df$cost * calc_df$push_funding)
   
-  return(list(total_milestone_cost = total_milestone_cost,
-              wasted_milestone_cost = wasted_milestone_cost,
-              prob_of_success = prob_of_success,
-              cost_to_attempt = cost_to_attempt,
-              shared_prize = shared_prize,
-              expected_shared_prize = exp_shared_prize,
-              n_firms = n_firms, 
-              global_pos = global_pos,
-              target_probability = target_probability,  
-              push_funding = push_funding,
-              cost_unit = data$cost_unit,
-              use_feasibility = use_feasibility,
-              eta = eta,
-              tot_duration = tot_duration))
+  return(
+    list(
+      total_milestone_cost = total_milestone_cost,
+      wasted_milestone_cost = wasted_milestone_cost,
+      prob_of_success = prob_of_success,
+      cost_to_attempt = cost_to_attempt,
+      shared_prize = shared_prize,
+      expected_shared_prize = exp_shared_prize,
+      n_firms = n_firms,
+      global_pos = global_pos,
+      target_probability = target_probability,
+      push_funding = push_funding,
+      cost_unit = data$cost_unit,
+      use_feasibility = use_feasibility,
+      eta = eta,
+      tot_duration = tot_duration
+    )
+  )
 }
 
 # Helper function to calculate AMC for a given target amount
-calculate_amc_for_target <- function(target_amount, ac_template, discount_rate, 
-                                     revenue_start_month = NULL, unit_factor = 1e6, 
+calculate_amc_for_target <- function(target_amount,
+                                     ac_template,
+                                     discount_rate,
+                                     revenue_start_month = NULL,
+                                     unit_factor = 1e6,
                                      optimization_mode = "topup_to_units",
                                      # Legacy parameters for backward compatibility - to make global updates on
                                      topup = NULL,
                                      global_pos = NULL,
                                      calculation_mode = NULL,
                                      target_units = NULL) {
-  
   # Handle legacy parameter names
   if (!is.null(calculation_mode)) {
     optimization_mode <- calculation_mode
@@ -142,17 +158,22 @@ calculate_amc_for_target <- function(target_amount, ac_template, discount_rate,
   }
   
   # Check if ac_template is valid
-  if (is.null(ac_template) || !is.data.frame(ac_template) || 
+  if (is.null(ac_template) || !is.data.frame(ac_template) ||
       nrow(ac_template) == 0 || any(is.na(ac_template))) {
-    return(list(
-      topup = if(optimization_mode == "topup_to_units") target_amount else 0,
-      units_to_cover_total = 0,
-      amc_size_undiscounted = 0,
-      amc_size_pv = 0,
-      expected_amc = 0,
-      covers_prize = FALSE,
-      optimization_mode = optimization_mode
-    ))
+    return(
+      list(
+        topup = if (optimization_mode == "topup_to_units")
+          target_amount
+        else
+          0,
+        units_to_cover_total = 0,
+        amc_size_undiscounted = 0,
+        amc_size_pv = 0,
+        expected_amc = 0,
+        covers_prize = FALSE,
+        optimization_mode = optimization_mode
+      )
+    )
   }
   
   if (optimization_mode == "topup_to_units") {
@@ -175,12 +196,14 @@ calculate_amc_for_target <- function(target_amount, ac_template, discount_rate,
     total_nominal_payments <- 0
     
     for (i in 1:nrow(ac_template)) {
-      if (remaining_prize_pv <= 1e-6) break
+      if (remaining_prize_pv <= 1e-6)
+        break
       
       # ac_template$month[i] is months after prize payout
       # Discount relative to prize payout time, not t=0
       months_after_prize <- ac_template$month[i]
-      discount_factor <- 1 / ((1 + discount_rate)^(months_after_prize/12))
+      discount_factor <- 1 / ((1 + discount_rate)^(months_after_prize /
+                                                     12))
       pv_per_unit <- as.numeric(topup_val) * discount_factor
       
       units_needed <- remaining_prize_pv / pv_per_unit
@@ -216,9 +239,9 @@ calculate_amc_for_target <- function(target_amount, ac_template, discount_rate,
     
     
   } else {
-    
     # Check if we have target_units specified
-    if (!is.null(target_units) && !is.na(target_units) && target_units > 0) {
+    if (!is.null(target_units) &&
+        !is.na(target_units) && target_units > 0) {
       # Use the helper function to back-calculate topup for specific units
       topup_calc <- calculate_topup_from_units(
         target_units = target_units,
@@ -231,23 +254,26 @@ calculate_amc_for_target <- function(target_amount, ac_template, discount_rate,
       
       if (!topup_calc$feasible) {
         # Return error state
-        return(list(
-          topup = topup_calc$topup,  # May be NA
-          units_to_cover_total = 0,
-          amc_size_undiscounted = 0,
-          amc_size_pv = 0,
-          expected_amc = 0,
-          covers_prize = FALSE,
-          optimization_mode = optimization_mode,
-          error = topup_calc$error
-        ))
+        return(
+          list(
+            topup = topup_calc$topup,
+            # May be NA
+            units_to_cover_total = 0,
+            amc_size_undiscounted = 0,
+            amc_size_pv = 0,
+            expected_amc = 0,
+            covers_prize = FALSE,
+            optimization_mode = optimization_mode,
+            error = topup_calc$error
+          )
+        )
       }
       
       # if succesful, Use the exact same calculation as the scenarios table
       topup_result <- topup_calc$topup
       units_to_cover_total <- topup_calc$units_covered
       
-      # Calculate total nominal AMC (undiscounted) 
+      # Calculate total nominal AMC (undiscounted)
       amc_size_undiscounted <- (topup_result * units_to_cover_total) / unit_factor
       
       # Calculate PV - the PV should equal target_amount since that's what we solved for
@@ -255,38 +281,46 @@ calculate_amc_for_target <- function(target_amount, ac_template, discount_rate,
       
     } else {
       # Fallback: No target_units provided - this shouldn't happen in units_to_topup mode
-      return(list(
-        topup = NA,
-        units_to_cover_total = 0,
-        amc_size_undiscounted = 0,
-        amc_size_pv = 0,
-        expected_amc = 0,
-        covers_prize = FALSE,
-        optimization_mode = optimization_mode,
-        error = "No target units specified for units_to_topup mode"
-      ))
+      return(
+        list(
+          topup = NA,
+          units_to_cover_total = 0,
+          amc_size_undiscounted = 0,
+          amc_size_pv = 0,
+          expected_amc = 0,
+          covers_prize = FALSE,
+          optimization_mode = optimization_mode,
+          error = "No target units specified for units_to_topup mode"
+        )
+      )
     }
   }
   
   
-  return(list(
-    topup = topup_result,
-    units_to_cover_total = units_to_cover_total,
-    amc_size_undiscounted = amc_size_undiscounted,
-    amc_size_pv = amc_size_pv,
-    expected_amc = amc_size_pv,  
-    covers_prize = TRUE,
-    optimization_mode = optimization_mode
-  ))
+  return(
+    list(
+      topup = topup_result,
+      units_to_cover_total = units_to_cover_total,
+      amc_size_undiscounted = amc_size_undiscounted,
+      amc_size_pv = amc_size_pv,
+      expected_amc = amc_size_pv,
+      covers_prize = TRUE,
+      optimization_mode = optimization_mode
+    )
+  )
 }
 
 # Function to back-calculate top-up from target units
-calculate_topup_from_units <- function(target_units, ac_template, discount_rate, 
-                                       unit_factor, target_amount, 
+calculate_topup_from_units <- function(target_units,
+                                       ac_template,
+                                       discount_rate,
+                                       unit_factor,
+                                       target_amount,
                                        revenue_start_month = 0) {
-  
   # Validate inputs
-  if (is.null(target_units) || is.na(target_units) || is.infinite(target_units) || target_units <= 0) {
+  if (is.null(target_units) ||
+      is.na(target_units) ||
+      is.infinite(target_units) || target_units <= 0) {
     return(list(
       topup = NA,
       feasible = FALSE,
@@ -302,7 +336,8 @@ calculate_topup_from_units <- function(target_units, ac_template, discount_rate,
     ))
   }
   
-  if (is.null(target_amount) || is.na(target_amount) || is.infinite(target_amount)) {
+  if (is.null(target_amount) ||
+      is.na(target_amount) || is.infinite(target_amount)) {
     return(list(
       topup = NA,
       feasible = FALSE,
@@ -317,9 +352,11 @@ calculate_topup_from_units <- function(target_units, ac_template, discount_rate,
     return(list(
       topup = NA,
       feasible = FALSE,
-      error = sprintf("Target units (%s) exceed lifecycle capacity (%s units)",
-                      format(round(target_units, 0), big.mark = ","),
-                      format(round(total_units_available, 0), big.mark = ","))
+      error = sprintf(
+        "Target units (%s) exceed lifecycle capacity (%s units)",
+        format(round(target_units, 0), big.mark = ","),
+        format(round(total_units_available, 0), big.mark = ",")
+      )
     ))
   }
   
@@ -327,15 +364,19 @@ calculate_topup_from_units <- function(target_units, ac_template, discount_rate,
   if (nrow(ac_template) > 0) {
     min_monthly_units <- min(ac_template$units)
     
-    if (is.na(min_monthly_units) || is.infinite(min_monthly_units)) {
-      return(list(
-        topup = NA,
-        feasible = FALSE,
-        error = "Adoption curve contains invalid unit values"
-      ))
+    if (is.na(min_monthly_units) ||
+        is.infinite(min_monthly_units)) {
+      return(
+        list(
+          topup = NA,
+          feasible = FALSE,
+          error = "Adoption curve contains invalid unit values"
+        )
+      )
     }
     
-    if (!is.na(target_units) && !is.na(min_monthly_units) && target_units < min_monthly_units) {
+    if (!is.na(target_units) &&
+        !is.na(min_monthly_units) && target_units < min_monthly_units) {
       # For very small targets, use fractional month approach
       fraction_of_month <- target_units / min_monthly_units
       
@@ -344,7 +385,9 @@ calculate_topup_from_units <- function(target_units, ac_template, discount_rate,
         slice(1) %>%
         mutate(
           month_from_now = month + ceiling(revenue_start_month),
-          monthly_rate = 1 / (((1 + discount_rate/100)^(1/12)) ^ month_from_now),
+          monthly_rate = 1 / (((
+            1 + discount_rate / 100
+          )^(1 / 12))^month_from_now),
           # Scale units and discounting by fraction
           units = units * fraction_of_month,
           discounted_units = units * monthly_rate
@@ -352,27 +395,41 @@ calculate_topup_from_units <- function(target_units, ac_template, discount_rate,
       
       sum_discounted_units <- sum(ac$discounted_units)
       
-      if (sum_discounted_units > 0 && !is.na(sum_discounted_units)) {
+      if (sum_discounted_units > 0 &&
+          !is.na(sum_discounted_units)) {
         target_amount_dollars <- target_amount * unit_factor
         required_topup <- target_amount_dollars / sum_discounted_units
         
-        if (!is.na(required_topup) && !is.infinite(required_topup)) {
-          return(list(
-            topup = required_topup,
-            units_covered = target_units,
-            feasible = TRUE,
-            error = NULL,
-            sum_discounted_units = sum_discounted_units
-          ))
+        if (!is.na(required_topup) &&
+            !is.infinite(required_topup)) {
+          return(
+            list(
+              topup = required_topup,
+              units_covered = target_units,
+              feasible = TRUE,
+              error = NULL,
+              sum_discounted_units = sum_discounted_units
+            )
+          )
         }
       }
       
       return(list(
         topup = NA,
         feasible = FALSE,
-        error = sprintf("Target units (%s) is less than one month of production (%s units). Consider increasing target.",
-                        format(round(target_units, 0), big.mark = ",", scientific = FALSE),
-                        format(round(min_monthly_units, 0), big.mark = ",", scientific = FALSE))
+        error = sprintf(
+          "Target units (%s) is less than one month of production (%s units). Consider increasing target.",
+          format(
+            round(target_units, 0),
+            big.mark = ",",
+            scientific = FALSE
+          ),
+          format(
+            round(min_monthly_units, 0),
+            big.mark = ",",
+            scientific = FALSE
+          )
+        )
       ))
     }
   }
@@ -382,7 +439,9 @@ calculate_topup_from_units <- function(target_units, ac_template, discount_rate,
   ac <- ac_template %>%
     mutate(
       month_from_now = month + ceiling(revenue_start_month),
-      monthly_rate = 1 / (((1 + discount_rate/100)^(1/12)) ^ month_from_now),
+      monthly_rate = 1 / (((
+        1 + discount_rate / 100
+      )^(1 / 12))^month_from_now),
       discounted_units = units * monthly_rate,
       cumsum_units = cumsum(units)
     ) %>%
@@ -424,11 +483,13 @@ calculate_topup_from_units <- function(target_units, ac_template, discount_rate,
   # Calculate actual units covered
   units_covered <- sum(ac$units)
   
-  return(list(
-    topup = required_topup,
-    units_covered = units_covered,
-    feasible = TRUE,
-    error = NULL,
-    sum_discounted_units = sum_discounted_units
-  ))
+  return(
+    list(
+      topup = required_topup,
+      units_covered = units_covered,
+      feasible = TRUE,
+      error = NULL,
+      sum_discounted_units = sum_discounted_units
+    )
+  )
 }

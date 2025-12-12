@@ -1460,9 +1460,11 @@ server <- function(input, output, session) {
     # Check for invalid values before proceeding
     if (is.null(topup) || is.na(topup) || is.infinite(topup) ||
         is.null(target_amount_val) ||
-        is.na(target_amount_val) || is.infinite(target_amount_val) ||
+        is.na(target_amount_val) ||
+        is.infinite(target_amount_val) ||
         is.null(revenue_start_month) ||
-        is.na(revenue_start_month) || is.infinite(revenue_start_month)) {
+        is.na(revenue_start_month) ||
+        is.infinite(revenue_start_month)) {
       return(NULL)
     }
     
@@ -1581,7 +1583,8 @@ server <- function(input, output, session) {
     
     # Need valid units input
     if (is.null(input$amc_target_units) ||
-        is.na(input$amc_target_units) || input$amc_target_units <= 0) {
+        is.na(input$amc_target_units) ||
+        input$amc_target_units <= 0) {
       return(NULL)
     }
     
@@ -1684,10 +1687,10 @@ server <- function(input, output, session) {
       
       # If milestone columns are missing (because they were hidden), add them back
       if (!("Milestone?" %in% colnames(current_data))) {
-        current_data$`Milestone?` <- FALSE
+        current_data$`Milestone?` <- TRUE
       }
       if (!("Stage Share (%)" %in% colnames(current_data))) {
-        current_data$`Stage Share (%)` <- 0
+        current_data$`Stage Share (%)` <- 10
       }
       
       # Handle column name changes (old "Probability" to new "Probability (%)")
@@ -1750,7 +1753,7 @@ server <- function(input, output, session) {
         `Probability (%)` = rep(80, extra),
         `Share of costs covered by other sources (%)` = rep(0.0, extra),
         `Milestone?` = rep(FALSE, extra),
-        `Stage Share (%)` = rep(0, extra),
+        `Stage Share (%)` = rep(10, extra),
         stringsAsFactors = FALSE,
         check.names = FALSE
       )
@@ -1894,7 +1897,8 @@ server <- function(input, output, session) {
     
     # If revenue modeling is enabled, sync to revenue start stage
     if (!is.null(input$model_revenue) &&
-        input$model_revenue && !is.null(input$revenue_start_stage)) {
+        input$model_revenue &&
+        !is.null(input$revenue_start_stage)) {
       default_selection <- input$revenue_start_stage
     }
     
@@ -2293,7 +2297,8 @@ server <- function(input, output, session) {
         )
         
       } else if (calc_mode == "topup_to_units" &&
-                 !is.null(results$amc$topup) && results$amc$topup > 0) {
+                 !is.null(results$amc$topup) &&
+                 results$amc$topup > 0) {
         topup <- results$amc$topup
         
         # Get revenue start month (EXACT same as purple card uses - no conversion)
@@ -2803,7 +2808,7 @@ server <- function(input, output, session) {
         arch_mech <- arch_res$mechanisms
         
         # Convert to proportion
-        arch_eta_prop = arch_eta / 100
+        arch_eta_prop = arch_eta 
         
         arch_max_achievable <- if (arch_use_feas)
           arch_eta_prop
@@ -3070,7 +3075,7 @@ server <- function(input, output, session) {
         style = "background: #F2D7EE;
              padding: 30px;
              border-radius: 16px;
-             box-shadow: 0 10px 40px rgba(102, 34, 96, 0.4);
+             box-shadow: 0 10px 40px white;
              margin-bottom: 30px;",
         
         # Container for the cards (shows all selected mechanisms)
@@ -3154,7 +3159,8 @@ server <- function(input, output, session) {
               
               # Show post-revenue amount (net) as main number if modeling revenue
               div(if (!is.null(results$model_revenue) &&
-                      results$model_revenue && results$revenue_pv > 0) {
+                      results$model_revenue &&
+                      results$revenue_pv > 0) {
                 sprintf("$%s%s",
                         format(round(
                           max(0, results$shared_prize - results$revenue_pv), 1
@@ -3168,7 +3174,8 @@ server <- function(input, output, session) {
               
               # Expected shared prize (smaller text below)
               div(if (!is.null(results$model_revenue) &&
-                      results$model_revenue && results$revenue_pv > 0) {
+                      results$model_revenue &&
+                      results$revenue_pv > 0) {
                 # Calculate expected from NET prize (after revenue), not gross
                 net_prize <- max(0, results$shared_prize - results$revenue_pv)
                 expected_net_prize <- net_prize * results$global_pos
@@ -3785,7 +3792,8 @@ server <- function(input, output, session) {
               
               if (!is.null(user_units) &&
                   !is.na(user_units) &&
-                  !is.null(s$units_covered) && !is.na(s$units_covered)) {
+                  !is.null(s$units_covered) &&
+                  !is.na(s$units_covered)) {
                 is_current <- abs(s$units_covered - user_units) < max(1, total_units_available * 0.01)
               }
               
@@ -3986,7 +3994,7 @@ server <- function(input, output, session) {
         div(
           h4(
             "Milestone Payment Structure",
-            style = "background: #DE7C5A;
+            style = "background: #662260;
             background-clip: text;
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
@@ -3994,15 +4002,15 @@ server <- function(input, output, session) {
             margin-bottom: 15px;
             font-size: 1.7rem; font-weight: 800;"
           ),
-          tags$div(style = "width: 80px; height: 3px; background: #DE7C5A; border-radius: 2px; margin-bottom: 20px;")
+          tags$div(style = "width: 80px; height: 3px; background: #662260; border-radius: 2px; margin-bottom: 20px;")
         ),
         
         # Pink gradient container
         div(
-          style = "background: #DE7C5A;
+          style = "background: #662260;
              padding: 25px 30px;
              border-radius: 16px;
-             box-shadow: 0 10px 40px #DE7C5A;
+             box-shadow: 0 10px 40px white;
              margin-bottom: 20px;",
           
           # Each milestone + AMC
@@ -4013,9 +4021,13 @@ server <- function(input, output, session) {
             lapply(ms$milestones, function(m) {
               div(
                 style = "background-color: rgba(255,255,255,0.15);
-                   padding: 15px 20px;
-                   border-radius: 10px;
-                   border-left: 4px solid white;",
+       padding: 15px 20px;
+       border-radius: 10px;
+       border-left: 4px solid white;
+       transition: all 0.3s ease;
+       cursor: pointer;",
+                onmouseover = "this.style.transform='translateX(8px)'; this.style.boxShadow='0 8px 30px rgba(0,0,0,0.3)'; this.style.backgroundColor='rgba(255,255,255,0.25)';",
+                onmouseout = "this.style.transform='translateX(0)'; this.style.boxShadow='none'; this.style.backgroundColor='rgba(255,255,255,0.15)';",
                 
                 div(
                   style = "display: flex; justify-content: space-between; align-items: center; color: white",
@@ -4060,16 +4072,18 @@ server <- function(input, output, session) {
                     "rgba(239, 68, 68, 0.2)"
                   else
                     "rgba(255,255,255,0.15)",
-                  ";
-       padding: 15px 20px;
-       border-radius: 10px;
-       border-left: 4px solid ",
+                        "; padding: 15px 20px;
+                         border-radius: 10px;
+                         border-left: 4px solid white;
+                   transition: all 0.3s ease;
+       cursor: pointer;",
                   if (has_amc_error)
                     "rgba(239, 68, 68, 0.8)"
                   else
                     "white",
                   ";"
-                ),
+                ), onmouseover = "this.style.transform='translateX(8px)'; this.style.boxShadow='0 8px 30px rgba(0,0,0,0.3)'; this.style.backgroundColor='rgba(255,255,255,0.25)';",
+                onmouseout = "this.style.transform='translateX(0)'; this.style.boxShadow='none'; this.style.backgroundColor='rgba(255,255,255,0.15)';",
                 
                 div(
                   style = "display: flex; justify-content: space-between; align-items: center; color: white",
@@ -4206,7 +4220,7 @@ server <- function(input, output, session) {
         div(
           h4(
             "Revenue Impact",
-            style = "background: #8DB790;
+            style = "background: #065f46;
         background-clip: text;
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
@@ -4251,8 +4265,12 @@ server <- function(input, output, session) {
             # Expected Development Costs
             div(
               style = "text-align: center; padding: 15px;
-                 background-color: rgba(255,255,255,0.15);
-                 border-radius: 10px;",
+     background-color: rgba(255,255,255,0.15);
+     border-radius: 10px;
+     transition: all 0.3s ease;
+     cursor: pointer;",
+              onmouseover = "this.style.transform='scale(1.05)'; this.style.boxShadow='0 8px 30px rgba(0,0,0,0.3)'; this.style.backgroundColor='rgba(255,255,255,0.25)';",
+              onmouseout = "this.style.transform='scale(1)'; this.style.boxShadow='none'; this.style.backgroundColor='rgba(255,255,255,0.15)';",
               div(
                 "Expected Development Costs",
                 style = "font-size: 11px; color: rgba(255,255,255,0.9);
@@ -4272,8 +4290,12 @@ server <- function(input, output, session) {
             # Expected Revenue
             div(
               style = "text-align: center; padding: 15px;
-                 background-color: rgba(255,255,255,0.15);
-                 border-radius: 10px;",
+     background-color: rgba(255,255,255,0.15);
+     border-radius: 10px;
+     transition: all 0.3s ease;
+     cursor: pointer;",
+              onmouseover = "this.style.transform='scale(1.05)'; this.style.boxShadow='0 8px 30px rgba(0,0,0,0.3)'; this.style.backgroundColor='rgba(255,255,255,0.25)';",
+              onmouseout = "this.style.transform='scale(1)'; this.style.boxShadow='none'; this.style.backgroundColor='rgba(255,255,255,0.15)';",
               div(
                 "Expected Revenue",
                 style = "font-size: 11px; color: rgba(255,255,255,0.9);
@@ -4301,11 +4323,16 @@ server <- function(input, output, session) {
             div("=", style = "font-size: 32px; font-weight: 300; color: white;"),
             
             # Net Cost
+            
             div(
               style = "text-align: center; padding: 15px;
-                 background-color: rgba(255,255,255,0.3);
-                 border-radius: 10px;
-                 border: 2px solid white;",
+     background-color: rgba(255,255,255,0.15);
+     border-radius: 10px;
+      border: 2px solid white;
+     transition: all 0.3s ease;
+     cursor: pointer;",
+              onmouseover = "this.style.transform='scale(1.05)'; this.style.boxShadow='0 8px 30px rgba(0,0,0,0.3)'; this.style.backgroundColor='rgba(255,255,255,0.25)';",
+              onmouseout = "this.style.transform='scale(1)'; this.style.boxShadow='none'; this.style.backgroundColor='rgba(255,255,255,0.15)';",
               div(
                 "Net Cost to Attempt",
                 style = "font-size: 11px; color: white;

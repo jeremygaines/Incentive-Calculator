@@ -2,7 +2,7 @@ ui <- fluidPage(
   useShinyjs(),
   tags$style(HTML(".shiny-busy { cursor: wait !important; }")),
   titlePanel(
-    div(style = "color: white; font-weight: 800; font-size: 3.5rem; text-shadow: 0 2px 20px rgba(0,0,0,0.3); letter-spacing: -1px; text-transform: uppercase;", "Financial Mechanism Calculator")
+    div(style = "color: white; font-weight: 800; font-size: 3.5rem; text-shadow: 0 2px 20px rgba(0,0,0,0.3); letter-spacing: -1px; text-transform: uppercase;", "Pull Sizing Calculator")
   ),
   
   # Introduction section
@@ -24,7 +24,7 @@ ui <- fluidPage(
         ),
         tags$li(
           tags$strong("Milestones + AMCs:"),
-          " Firms receive lump-sum payments upon completing specific development stages, followed by per-unit subsidies for commercialization"
+          " Firms receive lump-sum payments upon completing specific development stages, followed by per-unit subsidies (top-ups) for commercialization"
         )
       ),
       "The calculator allows you to model different scenarios including: multiple development stages with varying costs and success probabilities, different adoption and revenue curves, flexible AMC parameters (top-up amounts or target unit coverage), revenue generation timing (which stage revenue begins), and milestone payment schedules."
@@ -145,7 +145,7 @@ ui <- fluidPage(
     gap: 20px;
     align-items: flex-start;
   }
-  
+
   .nav-pills {
     flex-direction: column !important;
     width: 70px !important;
@@ -157,49 +157,49 @@ ui <- fluidPage(
     transition: width 0.3s ease !important;
     overflow: visible !important;
   }
-  
+
   .nav-pills:hover {
     width: 200px !important;
   }
-  
+
   .nav-pills > li {
     width: 100%;
     margin-bottom: 15px;
   }
-  
+
   /* ========== TAB BUTTONS (DEFAULT / HOVER / ACTIVE) ========== */
-  
+
   /* Base pill */
   .nav-pills > li > a {
     background-color: #D3D4D9 !important;
     background-image: none !important;
-  
+
     color: #58595B !important;
     border-radius: 12px !important;
     border: 2px solid transparent !important;
-  
+
     padding: 25px 15px !important;
     font-family: 'Proxima Nova', sans-serif !important;
     font-weight: 600 !important;
-  
+
     font-size: 0 !important;              /* hide text */
     white-space: nowrap !important;
-  
+
     display: flex !important;
     align-items: center !important;
     justify-content: center !important;
     gap: 10px !important;
-  
+
     transition: background-color 0.25s ease, transform 0.25s ease, box-shadow 0.25s ease !important;
   }
-  
+
   /* Icons */
   .nav-pills > li > a > i {
     font-size: 28px !important;
     min-width: 28px !important;
     color: #58595B !important;
   }
-  
+
   /* Reveal text on sidebar hover */
   .nav-pills:hover > li > a {
     font-size: 20px !important;
@@ -207,18 +207,18 @@ ui <- fluidPage(
     padding-left: 20px !important;
     padding-right: 20px !important;
   }
-  
+
     .nav-pills > li:not(.active) > a:hover {
       background-color: #BDBEC2 !important;
       background-image: none !important;
       transform: translateX(3px) !important;
     }
-  
+
   /* Non-active dim */
   .nav-pills > li:not(.active) > a {
     opacity: 0.7 !important;
   }
-  
+
     /* ACTIVE TAB – force gradient using shorthand background */
     .nav-pills > li.active > a,
     .nav-pills > li.active > a:hover,
@@ -231,7 +231,7 @@ ui <- fluidPage(
       transform: none !important;
       box-shadow: 0 10px 30px rgba(102, 34, 96, 0.25) !important;
     }
-  
+
   /* Active icon */
   .nav-pills > li.active > a > i {
     color: #111 !important;
@@ -243,7 +243,7 @@ ui <- fluidPage(
     backdrop-filter: blur(20px);
     padding: 30px;
     border-radius: 20px;
-    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+    box-shadow: none !important;
     border: 1px solid rgba(255, 255, 255, 0.2);
     min-width: 0;
   }
@@ -662,7 +662,7 @@ ui <- fluidPage(
     height: 95vh !important;
     border-radius: 20px !important;
     border: none !important;
-    box-shadow: 0 25px 80px rgba(0, 0, 0, 0.4) !important;
+    box-shadow: 0 25px 80px rgba(0, 0, 0, 0.4) ;
   }
 
   .modal-body {
@@ -937,7 +937,7 @@ ui <- fluidPage(
               numericInput(
                 "profit_per_unit",
                 "Profit per unit (dollars):",
-                value = 50,
+                value = 1,
                 min = 0,
                 step = 1
               ),
@@ -1074,7 +1074,7 @@ ui <- fluidPage(
                   min = 1,
                   step = 1000
                 ),
-                uiOutput("amc_units_validation_warning") 
+                uiOutput("amc_units_validation_warning")
               )
             )
           ),
@@ -1190,7 +1190,7 @@ ui <- fluidPage(
         class = "results-panel",
         uiOutput("results"),
         br(),
-        uiOutput("plot_section")   
+        uiOutput("plot_section")
       )
     )
   )

@@ -1,12 +1,12 @@
-name: AMCcalculator
-title: AMCCalculator
+name: PullSizingCalculator
+title: PullSizingCalculator
 username: msageorgiabradley
 account: msageorgiabradley
 server: shinyapps.io
 hostUrl: https://api.shinyapps.io/v1
-appId: 15911001
-bundleId: 11315501
-url: https://msageorgiabradley.shinyapps.io/AMCcalculator/
+appId: 16304370
+bundleId: 11315934
+url: https://msageorgiabradley.shinyapps.io/PullSizingCalculator/
 version: 1
 asMultiple: FALSE
 asStatic: FALSE
