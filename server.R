@@ -3522,7 +3522,7 @@ server <- function(input, output, session) {
                       ),
                       substr(unit_label, 2, 2)
                     ),
-                    style = "font-size: 12px; font-weight: 500; color: #662260s; margin-top: 8px;")
+                    style = "font-size: 12px; font-weight: 500; color: #662260; margin-top: 8px;")
                   },
                   # Milestone info - only show if no error
                   if (!has_amc_error) {
