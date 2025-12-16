@@ -786,8 +786,66 @@ ui <- fluidPage(
       });
     "
     )
+  ),
+
+  # Auto-resize script for iframe embedding
+  tags$script(
+    HTML(
+      "
+      // Function to send height to parent window (for WordPress embedding)
+      function sendHeightToParent() {
+        if (window.parent && window.parent.postMessage) {
+          var height = Math.max(
+            document.body.scrollHeight,
+            document.documentElement.scrollHeight,
+            document.body.offsetHeight,
+            document.documentElement.offsetHeight
+          );
+
+          window.parent.postMessage({
+            action: 'resize',
+            height: height
+          }, '*');
+        }
+      }
+
+      // Send height on page load
+      $(document).ready(function() {
+        setTimeout(sendHeightToParent, 500);
+        setTimeout(sendHeightToParent, 1000);
+        setTimeout(sendHeightToParent, 2000);
+      });
+
+      // Send height when content changes
+      var observer = new MutationObserver(function() {
+        sendHeightToParent();
+      });
+
+      observer.observe(document.body, {
+        childList: true,
+        subtree: true,
+        attributes: true
+      });
+
+      // Send height on window resize
+      $(window).on('resize', function() {
+        sendHeightToParent();
+      });
+
+      // Send height when tabs change
+      $('a[data-toggle=\"tab\"]').on('shown.bs.tab', function() {
+        setTimeout(sendHeightToParent, 300);
+      });
+
+      // Send height when calculate button is clicked
+      $(document).on('click', '#calculate', function() {
+        setTimeout(sendHeightToParent, 500);
+        setTimeout(sendHeightToParent, 1500);
+      });
+      "
+    )
   )),
-  
+
   # Main tabset with vertical tabs on left
   tabsetPanel(
     id = "main_tabs",
