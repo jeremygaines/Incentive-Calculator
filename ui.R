@@ -30,7 +30,7 @@ ui <- fluidPage(
       "The calculator allows you to model different scenarios including: multiple development stages with varying costs and success probabilities, different adoption and revenue curves, flexible AMC parameters (top-up amounts or target unit coverage), revenue generation timing (which stage revenue begins), and milestone payment schedules."
     ),
     tags$a(
-      href = "https://williamjackarnesen.github.io/msa-amc-sizing/",
+      href = "https://www.marketshapingaccelerator.org/pull-incentive-sizing-tool/",
       target = "_blank",
       style = "color: #662260; font-weight: 600; text-decoration: none; font-size: 14px;",
       "Read more about the methodology →"
@@ -50,11 +50,10 @@ ui <- fluidPage(
     font-display: swap;
   }
 
-  /* ========== BODY WITH SUBTLE GRADIENT ========== */
+  /* ========== BODY WITH BRAND PURPLE BACKGROUND ========== */
   body {
     font-family: 'Proxima Nova', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif !important;
-    background: linear-gradient(180deg, #662260 0%, #8E2F8B 35%, #C83BC9 70%) !important;
-    background-attachment: fixed !important;
+    background: #662260 !important;
     min-height: 100vh;
   }
 
@@ -208,6 +207,7 @@ ui <- fluidPage(
     padding-right: 20px !important;
   }
 
+    /* Brand color hover state (lighter gray) */
     .nav-pills > li:not(.active) > a:hover {
       background-color: #BDBEC2 !important;
       background-image: none !important;
@@ -261,7 +261,7 @@ ui <- fluidPage(
 
   /* ========== GOLD BUTTON ========== */
   .gold-button {
-    background: #FFB52C;
+    background: #FFB52C;  /* Brand Gold */
     color: #1a1a2e;
     border: none;
     font-weight: 700;
@@ -277,7 +277,7 @@ ui <- fluidPage(
   }
 
   .gold-button:hover {
-    background: #FFC34D;
+    background: #FFC34D;  /* Brand Gold - Hover State (lighter) */
     color: #1a1a2e;
     transform: translateY(-3px);
     box-shadow: 0 15px 40px rgba(252, 180, 44, 0.6);
@@ -302,7 +302,7 @@ ui <- fluidPage(
 
   /* ========== ORANGE BUTTON ========== */
   .orange-button {
-    background: #DE7C5A;
+    background: #DE7C5A;  /* Brand Orange */
     color: white;
     border: none;
     font-weight: 600;
@@ -318,7 +318,7 @@ ui <- fluidPage(
   }
 
   .orange-button:hover {
-    background: #E88B6A;
+    background: #E88B6A;  /* Brand Orange - Hover State (lighter) */
     color: white;
     transform: translateY(-3px);
     box-shadow: 0 15px 40px rgba(222, 124, 90, 0.6);
@@ -373,7 +373,7 @@ ui <- fluidPage(
   /* ========== FORM CONTROLS WITH FOCUS GLOW ========== */
   .form-control, .form-select {
     border-radius: 10px;
-    border: 2px solid #e0e7ff;
+    border: 2px solid #D3D4D9;
     padding: 12px 16px;
     font-family: 'Proxima Nova', sans-serif;
     background: white;
@@ -786,8 +786,66 @@ ui <- fluidPage(
       });
     "
     )
+  ),
+
+  # Auto-resize script for iframe embedding
+  tags$script(
+    HTML(
+      "
+      // Function to send height to parent window (for WordPress embedding)
+      function sendHeightToParent() {
+        if (window.parent && window.parent.postMessage) {
+          var height = Math.max(
+            document.body.scrollHeight,
+            document.documentElement.scrollHeight,
+            document.body.offsetHeight,
+            document.documentElement.offsetHeight
+          );
+
+          window.parent.postMessage({
+            action: 'resize',
+            height: height
+          }, '*');
+        }
+      }
+
+      // Send height on page load
+      $(document).ready(function() {
+        setTimeout(sendHeightToParent, 500);
+        setTimeout(sendHeightToParent, 1000);
+        setTimeout(sendHeightToParent, 2000);
+      });
+
+      // Send height when content changes
+      var observer = new MutationObserver(function() {
+        sendHeightToParent();
+      });
+
+      observer.observe(document.body, {
+        childList: true,
+        subtree: true,
+        attributes: true
+      });
+
+      // Send height on window resize
+      $(window).on('resize', function() {
+        sendHeightToParent();
+      });
+
+      // Send height when tabs change
+      $('a[data-toggle=\"tab\"]').on('shown.bs.tab', function() {
+        setTimeout(sendHeightToParent, 300);
+      });
+
+      // Send height when calculate button is clicked
+      $(document).on('click', '#calculate', function() {
+        setTimeout(sendHeightToParent, 500);
+        setTimeout(sendHeightToParent, 1500);
+      });
+      "
+    )
   )),
-  
+
   # Main tabset with vertical tabs on left
   tabsetPanel(
     id = "main_tabs",

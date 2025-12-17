@@ -1,0 +1,13 @@
+name: msa-pullsizing-incentive-calc1
+title: msa-pullsizing-incentive-calc1
+username: cgdev
+account: cgdev
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 16319950
+bundleId: 11328819
+url: https://cgdev.shinyapps.io/msa-pullsizing-incentive-calc1/
+version: 1
+asMultiple: FALSE
+asStatic: FALSE
+ignoredFiles: .claude/settings.local.json
