@@ -4279,8 +4279,7 @@ server <- function(input, output, session) {
               div(sprintf(
                 "$%s%s",
                 format(round(results$cost_to_attempt, 1), big.mark =
-                         ","),
-                substr(unit_label, 2, 2)
+                         ","),  substr(unit_label, 2, 2)
               ), style = "font-size: 24px; font-weight: 800; color: white;")
             ),
             
@@ -4464,9 +4463,9 @@ server <- function(input, output, session) {
                    background-clip: text;
                    -webkit-background-clip: text;
                    -webkit-text-fill-color: transparent;",
-          sprintf("$%s", format(
+          sprintf("$%s%s", format(
             round(results$cost_to_attempt, 1), big.mark = ","
-          ))
+          ),  substr(unit_label, 2, 2))
         )
       )
     )
