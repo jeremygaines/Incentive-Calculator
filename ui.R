@@ -1,5 +1,6 @@
 ui <- fluidPage(
   useShinyjs(),
+    title = "Pull Sizing Incentive Calculator",
   tags$style(HTML(".shiny-busy { cursor: wait !important; }")),
   titlePanel(
     div(style = "color: white; font-weight: 800; font-size: 3.5rem; text-shadow: 0 2px 20px rgba(0,0,0,0.3); letter-spacing: -1px; text-transform: uppercase;", "Pull Sizing Calculator")
@@ -780,7 +781,7 @@ ui <- fluidPage(
   
   /* ========== BOTTOM-RIGHT FIXED FOOTER LINK ========== */
 .bottom-right-footer {
-  position: fixed;
+  position: static;
   right: 18px;
   bottom: 14px;
   z-index: 9999;
@@ -848,7 +849,7 @@ a span.dropdown-arrow {
 .footer-fullsize a {
   font-size: 15px;
   font-weight: 700;
-  color: #DE7C5A !important;  /* Brand orange */
+  color: white !important;  /* Brand orange */
   text-decoration: none;
 }
 
@@ -858,23 +859,27 @@ a span.dropdown-arrow {
 
 /* ========== FIXED FOOTERS ========== */
 
+/* Footer container */
+.footer-container {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 40px;
+  padding-top: 20px;
+  font-family: 'Proxima Nova', 'Inter', sans-serif;
+}
+
 /* Left footer: static attribution + links */
 .bottom-left-footer {
-  position: fixed;
-  left: 18px;
-  bottom: 14px;
-  z-index: 9999;
-
   font-size: 12px;
   font-weight: 500;
-  font-family: 'Proxima Nova', 'Inter', sans-serif;
-
-  color: #58595B;
+  color: white;
   background: transparent;
+  text-align: left;
 }
 
 .bottom-left-footer a {
-  color: #DE7C5A !important;
+  color: white !important;
   text-decoration: none !important;
 }
 
@@ -884,20 +889,15 @@ a span.dropdown-arrow {
 
 /* Right footer: primary CTA */
 .bottom-right-footer {
-  position: fixed;
-  right: 18px;
-  bottom: 14px;
-  z-index: 9999;
-
-  font-size: 15px;
-  font-weight: 700;
+  font-size: 12px;
+  font-weight: 500;
   font-family: 'Proxima Nova', 'Inter', sans-serif;
-
   background: transparent;
+  text-align: right;
 }
 
 .bottom-right-footer a {
-  color: #DE7C5A !important;  /* Brand orange */
+  color: white !important;
   text-decoration: none !important;
 }
 
@@ -1397,33 +1397,35 @@ a span.dropdown-arrow {
     
     
   ),
-  
+
   tags$div(
-    class = "bottom-left-footer",
-    style = "color: #DE7C5A",
-    HTML(
+    class = "footer-container",
+    tags$div(
+      class = "bottom-left-footer",
+      HTML(
+        "
+      Author: Georgia Bradley (2025).
+      <a href='https://github.com/gbrad123/Incentive-Calculator' target='_blank'>
+        Git repository
+      </a>
+      &nbsp;|&nbsp;
+      <a href='https://docs.google.com/forms/d/1GoN0U9lbSCET4P3WlMjookgf0hGzX6xROYBJv1am1dM/viewform?edit_requested=true'
+         target='_blank'>
+        Feedback →
+      </a>
       "
-    Author: Georgia Bradley (2025). 
-    <a href='https://github.com/gbrad123/Incentive-Calculator' target='_blank'>
-      Git repository
-    </a>
-    &nbsp;|&nbsp;
-    <a href='https://docs.google.com/forms/d/1GoN0U9lbSCET4P3WlMjookgf0hGzX6xROYBJv1am1dM/viewform?edit_requested=true'
-       target='_blank'>
-      Feedback →
-    </a>
-    "
-    )
-  ),
-  
-  tags$div(
-    class = "bottom-right-footer",
-    tags$a(
-      href = "https://cgdev.shinyapps.io/msa-pullsizing-incentive-calc1/",
-      target = "_blank",
-      "View full-size version →"
+      )
+    ),
+
+    tags$div(
+      class = "bottom-right-footer",
+      tags$a(
+        href = "https://cgdev.shinyapps.io/msa-pullsizing-incentive-calc1/",
+        target = "_blank",
+        "View full-size version →"
+      )
     )
   )
-  
-  
+
+
 )
